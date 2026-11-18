@@ -1,0 +1,21 @@
+# Environment Variables & Secrets
+.env
+.env.local
+.streamlit/secrets.toml
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local Data Cache (Do not commit heavy cached OHLCV files)
+data/cache/
+data/colab_warehouse/
+data/sp500_constituents.csv
+
+# Virtual Environments
+venv/
+.venv/
+env/
+

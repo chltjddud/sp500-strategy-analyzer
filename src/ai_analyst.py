@@ -1,0 +1,129 @@
+"""
+Google Gemini AI Stock & Strategy Briefing Module.
+Reads GEMINI_API_KEY securely from environment, .env, or Streamlit secrets.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional
+
+import requests
+import yfinance as yf
+
+from src.data_loader import BASE_DIR
+
+ENV_FILE = BASE_DIR / ".env"
+SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+
+
+def load_gemini_api_key() -> str:
+    """Load GEMINI_API_KEY from env, Streamlit st.secrets, .env, or secrets.toml."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+
+    try:
+        import streamlit as st
+
+        if "GEMINI_API_KEY" in st.secrets:
+            return str(st.secrets["GEMINI_API_KEY"]).strip()
+    except Exception:
+        pass
+
+    for fpath in (ENV_FILE, SECRETS_FILE):
+        if fpath.exists():
+            try:
+                for line in fpath.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("GEMINI_API_KEY") and "=" in line:
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+            except Exception:
+                pass
+    return ""
+
+
+def fetch_recent_news_titles(ticker: str, max_items: int = 5) -> List[str]:
+    """Fetch recent news headlines for a ticker via yfinance."""
+    titles: List[str] = []
+    try:
+        news = yf.Ticker(ticker).news or []
+        for item in news[:max_items]:
+            title = ""
+            if isinstance(item, dict):
+                if "title" in item:
+                    title = str(item["title"])
+                elif isinstance(item.get("content"), dict):
+                    title = str(item["content"].get("title", ""))
+            if title:
+                titles.append(title)
+    except Exception:
+        pass
+    return titles
+
+
+def generate_ai_briefing(
+    ticker: str,
+    row_data: Dict[str, Any],
+    market_summary: Dict[str, Any],
+    api_key: Optional[str] = None,
+) -> str:
+    """
+    Call Google Gemini API to generate a concise, practical Korean trading briefing
+    combining strategy backtest stats, market regime, entry/TP/SL levels, and recent news.
+    """
+    key = (api_key or load_gemini_api_key()).strip()
+    if not key:
+        return "Gemini API Key가 설정되어 있지 않습니다. .env 또는 Streamlit Secrets에 GEMINI_API_KEY를 추가해 주세요."
+
+    news_titles = fetch_recent_news_titles(ticker, max_items=5)
+    news_text = "\n".join(f"- {t}" for t in news_titles) if news_titles else "- 최근 주요 뉴스 없음"
+
+    prompt = (
+        f"당신은 미국 주식 단기 스윙 트레이딩 전문 퀀트 애널리스트입니다.\n"
+        f"아래 정량 백테스팅 결과와 시장 상황, 최근 뉴스를 바탕으로 한국어로 간결하고 실전적인 매매 브리핑을 작성해 주세요.\n\n"
+        f"[종목 및 전략 정보]\n"
+        f"- 종목 티커: {ticker}\n"
+        f"- 매매기법 조합: {row_data.get('매매기법 조합')}\n"
+        f"- 매매 방법: {row_data.get('매매 방법')}\n"
+        f"- 과거 목표 도달 확률: {row_data.get('목표 도달 확률(%)')}% / 순수 승률: {row_data.get('순수 승률(%)')}% (표본 {row_data.get('발생 횟수')}회)\n"
+        f"- 평균 기대수익률: {row_data.get('기대 수익률(%)')}% | 손익비: 1:{row_data.get('손익비(R:R)')}\n"
+        f"- 권장 진입가격대: {row_data.get('권장 진입가')} (추격금지: {row_data.get('추격금지 상한')})\n"
+        f"- 맞춤 익절선: ${row_data.get('익절가($)')} (+{row_data.get('익절폭(+%)')}%)\n"
+        f"- 맞춤 손절선: ${row_data.get('손절가($)')} ({row_data.get('손절폭(-%)')}%)\n"
+        f"- 지수 대비 상대강도(60일 RS): {row_data.get('상대강도(RS%)')}%\n\n"
+        f"[전체 시장 국면]\n"
+        f"- SPY: ${market_summary.get('spy_close', '-')} | VIX: {market_summary.get('vix_close', '-')} | 상태: {market_summary.get('regime_label', '-')}\n\n"
+        f"[최근 뉴스 헤드라인]\n"
+        f"{news_text}\n\n"
+        f"[작성 형식 - 아래 3가지 항목으로 6~8줄 이내로 핵심만 작성]\n"
+        f"1. 종합 매수 적합도 (상/중/하) 및 이유\n"
+        f"2. 진입 및 리스크 관리 포인트 (뉴스/시장 국면 반영)\n"
+        f"3. 주의해야 할 변수"
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.35, "maxOutputTokens": 650},
+    }
+
+    last_err = ""
+    for model_name in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text = "".join(p.get("text", "") for p in parts).strip()
+                    if text:
+                        return text
+            last_err = f"HTTP {resp.status_code}: {resp.text[:180]}"
+        except Exception as exc:
+            last_err = str(exc)
+
+    return f"Gemini AI 응답을 가져오지 못했습니다. ({last_err})"
