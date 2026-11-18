@@ -910,14 +910,14 @@ def main() -> None:
             min_trades = st.slider("최소 과거 발생 횟수 (표본)", 3, 20, 5)
             recent_signal_days = st.slider("최근 시그널 탐지 범위 (거래일)", 1, 5, 2)
 
-        force_refresh = st.button("주가 데이터 새로고침 (캐시 갱신)", use_container_width=True)
+        force_refresh = st.button("주가 데이터 새로고침 (캐시 갱신)", width="stretch")
 
         st.divider()
         saved_url, saved_key = load_saved_credentials()
         with st.expander("Supabase DB 연결 (자가 피드백용)", expanded=not bool(saved_url and saved_key)):
             sb_url = st.text_input("Supabase Project URL", value=saved_url, placeholder="https://xxxxx.supabase.co")
             sb_key = st.text_input("Supabase API Key", value=saved_key, type="password", placeholder="anon public 또는 service_role 키")
-            if st.button("연결 테스트 및 저장", use_container_width=True):
+            if st.button("연결 테스트 및 저장", width="stretch"):
                 ok, msg = test_connection(sb_url, sb_key)
                 if ok:
                     save_credentials(sb_url, sb_key)
@@ -947,7 +947,7 @@ def main() -> None:
         st.title("S&P 500 매매기법 조합 확률 및 익절·손절 분석기")
     with col_hdr2:
         st.write("")
-        if st.button("사이드바 보이기 / 숨기기", use_container_width=True):
+        if st.button("사이드바 보이기 / 숨기기", width="stretch"):
             components.html(
                 """
                 <script>
@@ -1193,7 +1193,7 @@ def main() -> None:
                 display_cols = core_cols + extra_cols if show_extra_cols else core_cols
                 st.dataframe(
                     filtered_active[display_cols],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "Ticker": st.column_config.TextColumn("티커", width="small"),
@@ -1402,7 +1402,7 @@ def main() -> None:
                     theme=theme,
                     lookback_bars=lookback_bars,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 sub_t1, sub_t2 = st.tabs(
                     [
@@ -1431,7 +1431,7 @@ def main() -> None:
                                 "마지막 발생일",
                             ]
                         ],
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         column_config={
                             "매매기법 조합": st.column_config.TextColumn("매매기법 조합", width="medium"),
@@ -1470,7 +1470,7 @@ def main() -> None:
                                     "실현 수익률(%)",
                                 ]
                             ],
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "진입 종가($)": st.column_config.NumberColumn("진입 종가", format="$%.2f"),
@@ -1524,7 +1524,7 @@ def main() -> None:
                 xaxis=dict(range=[0, max(100.0, max_prob * 1.18)], gridcolor=theme["grid_color"]),
                 yaxis=dict(automargin=True),
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, width="stretch")
 
             st.markdown("#### 41개 매매기법 조합 전체 통계 비교")
             st.dataframe(
@@ -1541,7 +1541,7 @@ def main() -> None:
                         "현재시그널_종목수": "현재 시그널 종목",
                     }
                 ).drop(columns=["ComboID"]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1570,7 +1570,7 @@ def main() -> None:
                             "마지막 발생일",
                         ]
                     ],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "현재가($)": st.column_config.NumberColumn("현재가", format="$%.2f"),
@@ -1625,7 +1625,7 @@ def main() -> None:
         else:
             col_fb_btn1, col_fb_btn2 = st.columns(2)
             with col_fb_btn1:
-                if st.button("오늘 포착된 매수 시그널 DB에 기록하기", use_container_width=True):
+                if st.button("오늘 포착된 매수 시그널 DB에 기록하기", width="stretch"):
                     if active_signals_df.empty:
                         st.warning("현재 포착된 시그널이 없어 저장할 항목이 없습니다.")
                     else:
@@ -1636,7 +1636,7 @@ def main() -> None:
                             st.error(f"시그널 저장 오류: {exc}")
 
             with col_fb_btn2:
-                if st.button("과거 예측 자동 채점 및 자가 피드백 갱신", use_container_width=True):
+                if st.button("과거 예측 자동 채점 및 자가 피드백 갱신", width="stretch"):
                     with st.spinner("진행중(PENDING) 예측들을 최신 주가로 자동 채점하는 중..."):
                         try:
                             res_sum = grade_pending_signals(sb_client)
@@ -1691,7 +1691,7 @@ def main() -> None:
                                     "updated_at",
                                 ]
                             ],
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "combo_name": st.column_config.TextColumn("매매기법 조합"),
@@ -1746,7 +1746,7 @@ def main() -> None:
                                     "actual_return",
                                 ]
                             ],
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "signal_date": st.column_config.TextColumn("시그널 일자"),
@@ -1789,7 +1789,7 @@ def main() -> None:
                     "맞춤 손절선 (Stop-Loss)": meta["sl_rule"],
                 }
             )
-        st.dataframe(pd.DataFrame(guide_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(guide_rows), width="stretch", hide_index=True)
 
 
 if __name__ == "__main__":
