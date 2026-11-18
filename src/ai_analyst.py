@@ -127,3 +127,4 @@ def generate_ai_briefing(
             last_err = str(exc)
 
     return f"Gemini AI 응답을 가져오지 못했습니다. ({last_err})"
+
