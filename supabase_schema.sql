@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS signal_logs (
     predicted_hit_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
     regime_filter_on BOOLEAN NOT NULL DEFAULT TRUE,
     rs_filter_on BOOLEAN NOT NULL DEFAULT TRUE,
+    universe_scope TEXT NOT NULL DEFAULT 'TOP50', -- 'TOP50' | 'ALL'
+    is_top50 BOOLEAN NOT NULL DEFAULT TRUE,
     status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | WIN | LOSS | EXPIRED_WIN | EXPIRED_LOSS
     actual_return DOUBLE PRECISION,
     exit_price DOUBLE PRECISION,
@@ -39,15 +41,19 @@ CREATE TABLE IF NOT EXISTS signal_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 기존 테이블이 이미 있는 경우 새 컬럼 안전 추가 및 복합 유니크 인덱스 생성
+-- 기존 테이블이 이미 있는 경우 새 컬럼 안전 추가 및 4개 트랙 복합 유니크 인덱스 생성
 ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS regime_filter_on BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS rs_filter_on BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS universe_scope TEXT NOT NULL DEFAULT 'TOP50';
+ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS is_top50 BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS exit_date DATE;
 ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS days_held INTEGER;
 
 ALTER TABLE signal_logs DROP CONSTRAINT IF EXISTS signal_logs_ticker_combo_id_signal_date_key;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_logs_unique_regime
-    ON signal_logs (ticker, combo_id, signal_date, regime_filter_on);
+DROP INDEX IF EXISTS idx_signal_logs_unique_regime;
+DROP INDEX IF EXISTS idx_signal_logs_unique_4way;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_logs_unique_4way
+    ON signal_logs (ticker, combo_id, signal_date, regime_filter_on, universe_scope);
 
 -- 3. 기법 조합별 실전 채점 기반 자가 피드백 가중치 테이블
 CREATE TABLE IF NOT EXISTS strategy_feedback (

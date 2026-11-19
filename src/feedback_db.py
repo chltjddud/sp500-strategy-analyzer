@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from src.data_loader import BASE_DIR, fetch_single_stock
+from src.data_loader import BASE_DIR, TOP_50_TICKERS, fetch_single_stock
 
 SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
 ENV_FILE = BASE_DIR / ".env"
@@ -133,12 +133,14 @@ def save_signals_to_db(
     min_prob: float = 70.0,
     regime_filter_on: bool = True,
     rs_filter_on: bool = True,
+    universe_scope: str = "TOP50",
     max_rows: int = 50,
 ) -> int:
     """
     Save active signals meeting `min_prob` (e.g. >= 70%) into Supabase `signal_logs`
     as simulated paper-trades (assumed bought at `entry_price`, exited at `tp_price` or `sl_price`).
-    Tracks `regime_filter_on` separately so ON vs OFF versions can be compared.
+    Tracks both `universe_scope` ('TOP50' | 'ALL') and `regime_filter_on` (True | False)
+    so 4 distinct feedback tracks can be evaluated and compared.
     """
     if signals_df is None or signals_df.empty:
         return 0
@@ -147,14 +149,17 @@ def save_signals_to_db(
     if qualified.empty:
         return 0
 
+    clean_scope = "TOP50" if str(universe_scope).upper().startswith("TOP") else "ALL"
     rows_to_save: List[Dict[str, Any]] = []
     for _, row in qualified.iterrows():
         sig_date = str(row.get("마지막 발생일", "")).strip()
         if not sig_date or sig_date == "-":
             continue
+        ticker_str = str(row["Ticker"])
+        is_top50_val = ticker_str in TOP_50_TICKERS
         rows_to_save.append(
             {
-                "ticker": str(row["Ticker"]),
+                "ticker": ticker_str,
                 "combo_id": str(row["ComboID"]),
                 "combo_name": str(row["매매기법 조합"]),
                 "signal_date": sig_date,
@@ -165,6 +170,8 @@ def save_signals_to_db(
                 "predicted_hit_rate": float(row["목표 도달 확률(%)"]),
                 "regime_filter_on": bool(regime_filter_on),
                 "rs_filter_on": bool(rs_filter_on),
+                "universe_scope": clean_scope,
+                "is_top50": bool(is_top50_val),
                 "status": "PENDING",
             }
         )
@@ -172,23 +179,41 @@ def save_signals_to_db(
     if not rows_to_save:
         return 0
 
+    # Try 4-way conflict resolution first
+    try:
+        sb.table("signal_logs").upsert(
+            rows_to_save,
+            on_conflict="ticker,combo_id,signal_date,regime_filter_on,universe_scope",
+            ignore_duplicates=True,
+        ).execute()
+        return len(rows_to_save)
+    except Exception:
+        pass
+
+    # Fallback 1: without universe_scope in on_conflict
     try:
         sb.table("signal_logs").upsert(
             rows_to_save,
             on_conflict="ticker,combo_id,signal_date,regime_filter_on",
             ignore_duplicates=True,
         ).execute()
+        return len(rows_to_save)
     except Exception:
-        # Fallback if user hasn't run the ALTER TABLE migration yet
-        base_rows = [
-            {k: v for k, v in r.items() if k not in ("regime_filter_on", "rs_filter_on")}
-            for r in rows_to_save
-        ]
-        sb.table("signal_logs").upsert(
-            base_rows,
-            on_conflict="ticker,combo_id,signal_date",
-            ignore_duplicates=True,
-        ).execute()
+        pass
+
+    # Fallback 2: minimal base schema fallback
+    base_rows = [
+        {
+            k: v for k, v in r.items()
+            if k not in ("regime_filter_on", "rs_filter_on", "universe_scope", "is_top50")
+        }
+        for r in rows_to_save
+    ]
+    sb.table("signal_logs").upsert(
+        base_rows,
+        on_conflict="ticker,combo_id,signal_date",
+        ignore_duplicates=True,
+    ).execute()
 
     return len(rows_to_save)
 
@@ -381,23 +406,65 @@ def fetch_baseline_count(sb) -> int:
     return int(res.count or 0)
 
 
-def compute_regime_comparison(logs_df: pd.DataFrame) -> pd.DataFrame:
+def compute_4way_feedback_comparison(logs_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compare live paper-trading accuracy between `시장국면 필터 ON` and `시장국면 필터 OFF`.
+    Compare live paper-trading accuracy across 4 distinct feedback tracks:
+      Track 1: 상위 50 종목  + 시장국면 필터 ON
+      Track 2: 상위 50 종목  + 시장국면 필터 OFF
+      Track 3: S&P 500 전체 + 시장국면 필터 ON
+      Track 4: S&P 500 전체 + 시장국면 필터 OFF
     """
-    if logs_df is None or logs_df.empty or "regime_filter_on" not in logs_df.columns:
+    if logs_df is None or logs_df.empty:
         return pd.DataFrame()
 
     graded = logs_df[logs_df["status"] != "PENDING"].copy()
     if graded.empty:
         return pd.DataFrame()
 
+    # Fill / infer missing columns
+    if "is_top50" not in graded.columns:
+        graded["is_top50"] = graded["ticker"].isin(TOP_50_TICKERS)
+    else:
+        graded["is_top50"] = graded["is_top50"].fillna(graded["ticker"].isin(TOP_50_TICKERS)).astype(bool)
+
+    if "universe_scope" not in graded.columns:
+        graded["universe_scope"] = graded["is_top50"].map(lambda x: "TOP50" if x else "ALL")
+    else:
+        graded["universe_scope"] = graded["universe_scope"].fillna(
+            graded["is_top50"].map(lambda x: "TOP50" if x else "ALL")
+        ).astype(str)
+
+    if "regime_filter_on" not in graded.columns:
+        graded["regime_filter_on"] = True
+    else:
+        graded["regime_filter_on"] = graded["regime_filter_on"].fillna(True).astype(bool)
+
+    track_defs = [
+        ("Track 1", "상위 50대 종목", True, "필터 ON (안정장만)"),
+        ("Track 2", "상위 50대 종목", False, "필터 OFF (전체 장세)"),
+        ("Track 3", "S&P 500 전체", True, "필터 ON (안정장만)"),
+        ("Track 4", "S&P 500 전체", False, "필터 OFF (전체 장세)"),
+    ]
+
     rows: List[Dict[str, Any]] = []
-    for flag_val, grp in graded.groupby("regime_filter_on"):
+    for track_id, scope_label, regime_flag, regime_label in track_defs:
+        if scope_label.startswith("상위"):
+            mask = (graded["universe_scope"] == "TOP50") & (graded["regime_filter_on"] == regime_flag)
+            if not mask.any():
+                mask = (graded["is_top50"] == True) & (graded["regime_filter_on"] == regime_flag)
+        else:
+            mask = (graded["universe_scope"] == "ALL") & (graded["regime_filter_on"] == regime_flag)
+            if not mask.any() and (graded["universe_scope"] == "TOP50").all():
+                # If everything in DB was saved under a single universe scope
+                mask = graded["regime_filter_on"] == regime_flag
+
+        grp = graded[mask]
         total = int(len(grp))
         tp_wins = int((grp["status"] == "WIN").sum())
         all_wins = int(grp["status"].isin(["WIN", "EXPIRED_WIN"]).sum())
         sl_losses = int((grp["status"] == "LOSS").sum())
+        expired_cnt = int(grp["status"].isin(["EXPIRED_WIN", "EXPIRED_LOSS"]).sum())
+
         tp_hit_rate = round((tp_wins / total) * 100.0, 1) if total > 0 else 0.0
         total_win_rate = round((all_wins / total) * 100.0, 1) if total > 0 else 0.0
         avg_ret = round(float(grp["actual_return"].dropna().mean()), 2) if total > 0 else 0.0
@@ -406,17 +473,27 @@ def compute_regime_comparison(logs_df: pd.DataFrame) -> pd.DataFrame:
             if "days_held" in grp.columns and grp["days_held"].notna().any()
             else 0.0
         )
+
         rows.append(
             {
-                "필터 버전": "시장국면 필터 ON (안정장만)" if bool(flag_val) else "시장국면 필터 OFF (전체 장세)",
+                "트랙": track_id,
+                "종목 범위": scope_label,
+                "시장국면 필터": regime_label,
                 "채점 건수": total,
                 "익절 도달(WIN)": tp_wins,
                 "손절 이탈(LOSS)": sl_losses,
+                "만기 청산": expired_cnt,
                 "익절 적중률(%)": tp_hit_rate,
                 "전체 승률(%)": total_win_rate,
                 "평균 수익률(%)": avg_ret,
                 "평균 보유일(일)": avg_days,
             }
         )
+
     return pd.DataFrame(rows)
+
+
+def compute_regime_comparison(logs_df: pd.DataFrame) -> pd.DataFrame:
+    """Backward-compatible wrapper returning 4-way feedback comparison."""
+    return compute_4way_feedback_comparison(logs_df)
 

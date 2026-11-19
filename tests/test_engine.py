@@ -163,3 +163,27 @@ def test_analyze_single_stock_with_strategy_tpsl() -> None:
     )
     assert len(best_df) == 2
     assert not leader_df.empty
+
+
+def test_4way_feedback_comparison() -> None:
+    """Verify that compute_4way_feedback_comparison produces 4 distinct evaluation tracks."""
+    from src.feedback_db import compute_4way_feedback_comparison
+
+    mock_logs = pd.DataFrame(
+        [
+            {"ticker": "NVDA", "status": "WIN", "actual_return": 4.5, "days_held": 3, "universe_scope": "TOP50", "regime_filter_on": True},
+            {"ticker": "AAPL", "status": "LOSS", "actual_return": -3.2, "days_held": 5, "universe_scope": "TOP50", "regime_filter_on": False},
+            {"ticker": "PLTR", "status": "WIN", "actual_return": 6.1, "days_held": 4, "universe_scope": "ALL", "regime_filter_on": True},
+            {"ticker": "COIN", "status": "EXPIRED_LOSS", "actual_return": -1.2, "days_held": 10, "universe_scope": "ALL", "regime_filter_on": False},
+        ]
+    )
+
+    comp_df = compute_4way_feedback_comparison(mock_logs)
+    assert len(comp_df) == 4
+    assert set(comp_df["트랙"].tolist()) == {"Track 1", "Track 2", "Track 3", "Track 4"}
+
+    t1 = comp_df[comp_df["트랙"] == "Track 1"].iloc[0]
+    assert t1["종목 범위"] == "상위 50대 종목"
+    assert "ON" in t1["시장국면 필터"]
+    assert t1["채점 건수"] == 1
+    assert t1["익절 적중률(%)"] == 100.0

@@ -78,8 +78,38 @@ def main() -> None:
     hold_days = 10
     min_prob = 70.0
 
-    print("=== [3/4] 시장국면 필터 ON / OFF 두 버전 스캔 ===")
-    act_on, _, _ = scan_market(
+    print("=== [3/4] 4대 트랙 (상위 50 / 전체 500 × 시장국면 ON / OFF) 스캔 ===")
+    # Track 1 & 2: Top 50 universe
+    stock_data_top50 = {t: stock_data[t] for t in TOP_50_TICKERS if t in stock_data}
+    constituents_top50 = constituents_df[constituents_df["Symbol"].isin(TOP_50_TICKERS)]
+
+    print(f"-> 상위 50개 데이터: {len(stock_data_top50)}개 종목")
+    act_top50_on, _, _ = scan_market(
+        stock_data=stock_data_top50,
+        constituents_df=constituents_top50,
+        hold_days=hold_days,
+        use_dynamic_tpsl=True,
+        market_ctx_df=market_ctx_df,
+        use_regime_filter=True,
+        vix_max=26.0,
+        use_rs_filter=True,
+        feedback_bonus_map=fb_bonus_map,
+    )
+    act_top50_off, _, _ = scan_market(
+        stock_data=stock_data_top50,
+        constituents_df=constituents_top50,
+        hold_days=hold_days,
+        use_dynamic_tpsl=True,
+        market_ctx_df=market_ctx_df,
+        use_regime_filter=False,
+        vix_max=26.0,
+        use_rs_filter=True,
+        feedback_bonus_map=fb_bonus_map,
+    )
+
+    # Track 3 & 4: All S&P 500 universe
+    print(f"-> S&P 500 전체 데이터: {len(stock_data)}개 종목")
+    act_all_on, _, _ = scan_market(
         stock_data=stock_data,
         constituents_df=constituents_df,
         hold_days=hold_days,
@@ -90,7 +120,7 @@ def main() -> None:
         use_rs_filter=True,
         feedback_bonus_map=fb_bonus_map,
     )
-    act_off, _, _ = scan_market(
+    act_all_off, _, _ = scan_market(
         stock_data=stock_data,
         constituents_df=constituents_df,
         hold_days=hold_days,
@@ -104,8 +134,10 @@ def main() -> None:
 
     # Filter out stocks with upcoming earnings within hold_days + 3
     all_cands = list(
-        set(act_on["Ticker"].tolist() if not act_on.empty else [])
-        | set(act_off["Ticker"].tolist() if not act_off.empty else [])
+        set(act_top50_on["Ticker"].tolist() if not act_top50_on.empty else [])
+        | set(act_top50_off["Ticker"].tolist() if not act_top50_off.empty else [])
+        | set(act_all_on["Ticker"].tolist() if not act_all_on.empty else [])
+        | set(act_all_off["Ticker"].tolist() if not act_all_off.empty else [])
     )
     earnings_map = fetch_upcoming_earnings_days(all_cands) if all_cands else {}
 
@@ -117,17 +149,35 @@ def main() -> None:
         )
         return df[safe].reset_index(drop=True)
 
-    act_on = _filter_earnings(act_on)
-    act_off = _filter_earnings(act_off)
+    act_top50_on = _filter_earnings(act_top50_on)
+    act_top50_off = _filter_earnings(act_top50_off)
+    act_all_on = _filter_earnings(act_all_on)
+    act_all_off = _filter_earnings(act_all_off)
 
-    print("=== [4/4] 70% 이상 고확률 시그널 Supabase 저장 ===")
-    saved_on = save_signals_to_db(
-        sb, act_on, hold_days=hold_days, min_prob=min_prob, regime_filter_on=True, rs_filter_on=True
+    print("=== [4/4] 4대 트랙 70% 이상 고확률 시그널 Supabase 저장 ===")
+    saved_top50_on = save_signals_to_db(
+        sb, act_top50_on, hold_days=hold_days, min_prob=min_prob,
+        regime_filter_on=True, rs_filter_on=True, universe_scope="TOP50",
     )
-    saved_off = save_signals_to_db(
-        sb, act_off, hold_days=hold_days, min_prob=min_prob, regime_filter_on=False, rs_filter_on=True
+    saved_top50_off = save_signals_to_db(
+        sb, act_top50_off, hold_days=hold_days, min_prob=min_prob,
+        regime_filter_on=False, rs_filter_on=True, universe_scope="TOP50",
     )
-    print(f"저장 완료 — 필터 ON: {saved_on}건 | 필터 OFF: {saved_off}건")
+    saved_all_on = save_signals_to_db(
+        sb, act_all_on, hold_days=hold_days, min_prob=min_prob,
+        regime_filter_on=True, rs_filter_on=True, universe_scope="ALL",
+    )
+    saved_all_off = save_signals_to_db(
+        sb, act_all_off, hold_days=hold_days, min_prob=min_prob,
+        regime_filter_on=False, rs_filter_on=True, universe_scope="ALL",
+    )
+    print(
+        f"4대 트랙 저장 완료:\n"
+        f"  1) 상위 50 종목 · 국면 ON : {saved_top50_on}건\n"
+        f"  2) 상위 50 종목 · 국면 OFF: {saved_top50_off}건\n"
+        f"  3) 전체 500 종목 · 국면 ON : {saved_all_on}건\n"
+        f"  4) 전체 500 종목 · 국면 OFF: {saved_all_off}건"
+    )
 
 
 if __name__ == "__main__":

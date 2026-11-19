@@ -52,9 +52,7 @@ from src.feedback_db import (
     get_supabase_client,
     grade_pending_signals,
     load_saved_credentials,
-    save_credentials,
     save_signals_to_db,
-    test_connection,
 )
 from src.strategies import (
     STRATEGY_METADATA,
@@ -190,6 +188,15 @@ def apply_theme_css(theme: Dict[str, str]) -> None:
         }}
         .stButton > button:hover, .stDownloadButton > button:hover {{
             background-color: {btn_hover} !important;
+            border-color: {theme['accent']} !important;
+        }}
+        .stButton > button[kind="primary"] {{
+            background-color: {theme['accent']} !important;
+            color: #ffffff !important;
+            border: 1px solid {theme['accent']} !important;
+        }}
+        .stButton > button[kind="primary"]:hover {{
+            opacity: 0.92 !important;
             border-color: {theme['accent']} !important;
         }}
         [data-testid="stExpander"] {{
@@ -360,6 +367,76 @@ def apply_theme_css(theme: Dict[str, str]) -> None:
             margin: 10px 0 16px 0;
             color: {theme['text_main']};
             line-height: 1.6;
+        }}
+
+        /* Landing Page Hero & Universe Selection Cards */
+        .landing-hero {{
+            background: linear-gradient(135deg, {theme['card_bg']} 0%, {theme['subcard_bg']} 100%);
+            border: 1px solid {theme['border']};
+            border-radius: 18px;
+            padding: 36px 32px;
+            margin: 12px 0 24px 0;
+            text-align: center;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+        }}
+        .landing-eyebrow {{
+            display: inline-block;
+            background-color: {theme['accent_soft']};
+            color: {theme['accent']};
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            padding: 5px 14px;
+            border-radius: 999px;
+            margin-bottom: 14px;
+        }}
+        .landing-title {{
+            font-size: 2.05rem;
+            font-weight: 800;
+            color: {theme['text_main']};
+            margin: 0 0 12px 0;
+            line-height: 1.25;
+            word-break: keep-all;
+        }}
+        .landing-sub {{
+            font-size: 1.02rem;
+            color: {theme['text_sub']};
+            max-width: 720px;
+            margin: 0 auto;
+            line-height: 1.65;
+            word-break: keep-all;
+        }}
+        .mode-card {{
+            background-color: {theme['card_bg']};
+            border: 1px solid {theme['border']};
+            border-top: 4px solid {theme['accent']};
+            border-radius: 16px;
+            padding: 24px 22px 18px 22px;
+            margin-bottom: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+            min-height: 185px;
+        }}
+        .mode-badge {{
+            display: inline-block;
+            background-color: {theme['accent_soft']};
+            color: {theme['accent']};
+            font-size: 0.78rem;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 999px;
+            margin-bottom: 10px;
+        }}
+        .mode-title {{
+            font-size: 1.32rem;
+            font-weight: 800;
+            color: {theme['text_main']};
+            margin-bottom: 8px;
+        }}
+        .mode-desc {{
+            font-size: 0.94rem;
+            color: {theme['text_sub']};
+            line-height: 1.55;
+            word-break: keep-all;
         }}
         </style>
         """,
@@ -775,18 +852,433 @@ def render_kpi_row(items: List[Dict[str, str]]) -> None:
             )
 
 
+def render_supabase_setup_guide() -> None:
+    """Display safe notice when server-side database credentials are not configured."""
+    st.info(
+        "피드백 데이터베이스가 아직 서버 환경변수(.env 또는 Streamlit Secrets)에 설정되지 않았습니다. "
+        "관리자 환경설정 후 자동으로 활성화됩니다."
+    )
+
+
+def render_feedback_results(sb_client, theme: Dict[str, str]) -> None:
+    """Render KPI metrics and 3 feedback/grading sub-tabs from Supabase."""
+    try:
+        logs_df = fetch_signal_logs(sb_client, limit=200)
+        fb_df = fetch_strategy_feedback(sb_client)
+        baseline_cnt = fetch_baseline_count(sb_client)
+
+        total_logs = len(logs_df)
+        pending_cnt = int((logs_df["status"] == "PENDING").sum()) if not logs_df.empty else 0
+        graded_df = logs_df[logs_df["status"] != "PENDING"] if not logs_df.empty else pd.DataFrame()
+        graded_cnt = len(graded_df)
+        live_win_rate = (
+            round(float(graded_df["status"].isin(["WIN", "EXPIRED_WIN"]).mean() * 100.0), 1)
+            if graded_cnt > 0
+            else 0.0
+        )
+
+        render_kpi_row(
+            [
+                {"label": "Colab 초반 학습 데이터", "value": f"{baseline_cnt:,}건", "sub": "strategy_baseline 테이블"},
+                {"label": "누적 시그널 기록", "value": f"{total_logs}건", "sub": f"채점 대기중(PENDING): {pending_cnt}건"},
+                {"label": "자동 채점 완료", "value": f"{graded_cnt}건", "sub": "실제 주가 기반 승패 판정 완료", "color": theme["accent"]},
+                {"label": "실전 누적 승률", "value": f"{live_win_rate:.1f}%" if graded_cnt > 0 else "-", "sub": "채점 완료 건 기준 실제 승률", "color": theme["tp_color"]},
+            ]
+        )
+
+        st.write("")
+        fb_tab1, fb_tab2, fb_tab3 = st.tabs(
+            [
+                "4대 트랙(50/500 × 국면ON/OFF) 실전 성과 비교",
+                "기법 조합별 자가 피드백 가중치",
+                "가상 매매 기록 및 채점 상세 로그",
+            ]
+        )
+        with fb_tab1:
+            comp_df = compute_regime_comparison(logs_df)
+            if comp_df.empty:
+                st.info(
+                    "아직 채점이 완료된 4대 트랙 비교 데이터가 없습니다. "
+                    "'4대 트랙 동시 기록' 버튼으로 시그널을 기록하거나 장 마감 후 매일 자동 채점이 진행되면 "
+                    "이곳에서 4개 트랙의 실제 적중률과 손익비를 비교할 수 있습니다."
+                )
+            else:
+                st.dataframe(
+                    comp_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "트랙": st.column_config.TextColumn("트랙", width="small"),
+                        "종목 범위": st.column_config.TextColumn("종목 범위", width="medium"),
+                        "시장국면 필터": st.column_config.TextColumn("시장국면 필터", width="medium"),
+                        "채점 건수": st.column_config.NumberColumn("채점 수"),
+                        "익절 도달(WIN)": st.column_config.NumberColumn("익절(WIN)"),
+                        "손절 이탈(LOSS)": st.column_config.NumberColumn("손절(LOSS)"),
+                        "만기 청산": st.column_config.NumberColumn("만기 청산"),
+                        "익절 적중률(%)": st.column_config.ProgressColumn(
+                            "익절 적중률", format="%.1f%%", min_value=0, max_value=100
+                        ),
+                        "전체 승률(%)": st.column_config.ProgressColumn(
+                            "전체 승률", format="%.1f%%", min_value=0, max_value=100
+                        ),
+                        "평균 수익률(%)": st.column_config.NumberColumn("평균 수익률", format="%+.2f%%"),
+                        "평균 보유일(일)": st.column_config.NumberColumn("평균 보유일", format="%.1f일"),
+                    },
+                )
+
+        with fb_tab2:
+            if fb_df.empty:
+                st.info("아직 채점이 완료된 기록이 없습니다. 시그널을 저장하고 기간이 지난 뒤 '자동 채점'을 실행하면 기법별 피드백 가중치가 자동 계산됩니다.")
+            else:
+                st.dataframe(
+                    fb_df[
+                        [
+                            "combo_name",
+                            "total_graded",
+                            "wins",
+                            "losses",
+                            "live_win_rate",
+                            "avg_live_return",
+                            "feedback_bonus",
+                            "updated_at",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "combo_name": st.column_config.TextColumn("매매기법 조합"),
+                        "total_graded": st.column_config.NumberColumn("채점 수"),
+                        "wins": st.column_config.NumberColumn("성공"),
+                        "losses": st.column_config.NumberColumn("실패"),
+                        "live_win_rate": st.column_config.NumberColumn("실전 승률", format="%.1f%%"),
+                        "avg_live_return": st.column_config.NumberColumn("평균 실전수익", format="%+.2f%%"),
+                        "feedback_bonus": st.column_config.NumberColumn("피드백 가중치", format="%+.2f"),
+                    },
+                )
+
+        with fb_tab3:
+            if logs_df.empty:
+                st.info("저장된 시그널 기록이 없습니다. 상단의 가상 매수 기록 버튼을 눌러보세요.")
+            else:
+                status_label_map = {
+                    "WIN": "적중 (O) - 익절 도달",
+                    "EXPIRED_WIN": "적중 (O) - 만기 수익",
+                    "LOSS": "실패 (X) - 손절 이탈",
+                    "EXPIRED_LOSS": "실패 (X) - 만기 손실",
+                    "PENDING": "진행중 (대기)",
+                }
+                logs_view = logs_df.copy()
+                logs_view["예측 판정"] = logs_view["status"].map(
+                    lambda s: status_label_map.get(str(s), str(s))
+                )
+                if "regime_filter_on" in logs_view.columns:
+                    logs_view["필터 버전"] = logs_view["regime_filter_on"].map(
+                        lambda v: "국면 ON" if bool(v) else "국면 OFF"
+                    )
+                else:
+                    logs_view["필터 버전"] = "국면 ON"
+
+                if "universe_scope" in logs_view.columns:
+                    logs_view["종목 범위"] = logs_view["universe_scope"].map(
+                        lambda u: "상위 50개" if str(u).upper().startswith("TOP") else "전체 종목"
+                    )
+                elif "is_top50" in logs_view.columns:
+                    logs_view["종목 범위"] = logs_view["is_top50"].map(
+                        lambda b: "상위 50개" if bool(b) else "전체 종목"
+                    )
+                else:
+                    logs_view["종목 범위"] = logs_view["ticker"].map(
+                        lambda t: "상위 50개" if t in TOP_50_TICKERS else "전체 종목"
+                    )
+
+                if "exit_date" not in logs_view.columns:
+                    logs_view["exit_date"] = "-"
+                if "days_held" not in logs_view.columns:
+                    logs_view["days_held"] = None
+
+                f_r1, f_r2, f_r3 = st.columns(3)
+                with f_r1:
+                    filter_choice = st.radio(
+                        "예측 결과 필터",
+                        options=["전체", "적중 (O)만 보기", "실패 (X)만 보기", "진행중 (대기)만 보기"],
+                        horizontal=True,
+                        key="fb_res_filter",
+                    )
+                with f_r2:
+                    scope_choice = st.radio(
+                        "종목 범위 필터",
+                        options=["전체 범위", "상위 50개만", "전체 종목만"],
+                        horizontal=True,
+                        key="fb_scope_filter",
+                    )
+                with f_r3:
+                    ver_choice = st.radio(
+                        "시장국면 필터 버전",
+                        options=["전체 버전", "국면 ON만", "국면 OFF만"],
+                        horizontal=True,
+                        key="fb_ver_filter",
+                    )
+
+                if filter_choice.startswith("적중"):
+                    logs_view = logs_view[logs_view["status"].isin(["WIN", "EXPIRED_WIN"])]
+                elif filter_choice.startswith("실패"):
+                    logs_view = logs_view[logs_view["status"].isin(["LOSS", "EXPIRED_LOSS"])]
+                elif filter_choice.startswith("진행중"):
+                    logs_view = logs_view[logs_view["status"] == "PENDING"]
+
+                if scope_choice == "상위 50개만":
+                    logs_view = logs_view[logs_view["종목 범위"] == "상위 50개"]
+                elif scope_choice == "전체 종목만":
+                    logs_view = logs_view[logs_view["종목 범위"] == "전체 종목"]
+
+                if ver_choice == "국면 ON만":
+                    logs_view = logs_view[logs_view["필터 버전"] == "국면 ON"]
+                elif ver_choice == "국면 OFF만":
+                    logs_view = logs_view[logs_view["필터 버전"] == "국면 OFF"]
+
+                st.dataframe(
+                    logs_view[
+                        [
+                            "signal_date",
+                            "ticker",
+                            "종목 범위",
+                            "필터 버전",
+                            "combo_name",
+                            "예측 판정",
+                            "entry_price",
+                            "tp_price",
+                            "sl_price",
+                            "predicted_hit_rate",
+                            "exit_price",
+                            "exit_date",
+                            "days_held",
+                            "actual_return",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "signal_date": st.column_config.TextColumn("매수(시그널)일"),
+                        "ticker": st.column_config.TextColumn("티커"),
+                        "종목 범위": st.column_config.TextColumn("종목 범위"),
+                        "필터 버전": st.column_config.TextColumn("국면 필터"),
+                        "combo_name": st.column_config.TextColumn("매매기법 조합"),
+                        "예측 판정": st.column_config.TextColumn("예측 판정"),
+                        "entry_price": st.column_config.NumberColumn("매수 진입가", format="$%.2f"),
+                        "tp_price": st.column_config.NumberColumn("익절선", format="$%.2f"),
+                        "sl_price": st.column_config.NumberColumn("손절선", format="$%.2f"),
+                        "predicted_hit_rate": st.column_config.NumberColumn("예측 확률", format="%.1f%%"),
+                        "exit_price": st.column_config.NumberColumn("매도(청산)가", format="$%.2f"),
+                        "exit_date": st.column_config.TextColumn("매도일"),
+                        "days_held": st.column_config.NumberColumn("보유일"),
+                        "actual_return": st.column_config.NumberColumn("실제 수익률", format="%+.2f%%"),
+                    },
+                )
+    except Exception:
+        st.warning("피드백 데이터를 불러오는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+
+
+def render_landing_page(theme: Dict[str, str], total_sp500: int) -> None:
+    """Render a minimal, polished landing page with 3 buttons: Top 50, All 500, and Auto-Grading."""
+    st.markdown(
+        f"""
+        <style>
+        .st-key-landing_btn_50 button,
+        .st-key-landing_btn_500 button,
+        .st-key-landing_btn_feedback button {{
+            min-height: 122px !important;
+            border-radius: 18px !important;
+            padding: 22px 20px !important;
+            border: none !important;
+            color: #ffffff !important;
+            font-size: 1.08rem !important;
+            font-weight: 700 !important;
+            line-height: 1.55 !important;
+            white-space: pre-line !important;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease !important;
+        }}
+        .st-key-landing_btn_50 button {{
+            background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+            box-shadow: 0 10px 26px rgba(37, 99, 235, 0.24) !important;
+        }}
+        .st-key-landing_btn_500 button {{
+            background: linear-gradient(135deg, #059669 0%, #0d9488 100%) !important;
+            box-shadow: 0 10px 26px rgba(5, 150, 105, 0.24) !important;
+        }}
+        .st-key-landing_btn_feedback button {{
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+            box-shadow: 0 10px 26px rgba(99, 102, 241, 0.24) !important;
+        }}
+        .st-key-landing_btn_50 button:hover,
+        .st-key-landing_btn_500 button:hover,
+        .st-key-landing_btn_feedback button:hover {{
+            transform: translateY(-3px) !important;
+            filter: brightness(1.06) !important;
+        }}
+        .st-key-landing_btn_50 button:hover {{
+            box-shadow: 0 16px 32px rgba(37, 99, 235, 0.34) !important;
+        }}
+        .st-key-landing_btn_500 button:hover {{
+            box-shadow: 0 16px 32px rgba(5, 150, 105, 0.34) !important;
+        }}
+        .st-key-landing_btn_feedback button:hover {{
+            box-shadow: 0 16px 32px rgba(99, 102, 241, 0.34) !important;
+        }}
+        .st-key-landing_btn_50 button p,
+        .st-key-landing_btn_500 button p,
+        .st-key-landing_btn_feedback button p {{
+            color: #ffffff !important;
+            font-size: 1.06rem !important;
+            font-weight: 700 !important;
+        }}
+        </style>
+        <div style="text-align:center; padding: 95px 16px 40px 16px;">
+            <h1 class="landing-title" style="letter-spacing:-0.02em;">S&amp;P 500 매매기법 조합 확률 분석기</h1>
+            <p style="color:{theme['text_sub']}; font-size:1.02rem; margin-top:10px;">
+                실행할 모드를 선택하세요.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _, col_50, col_500, col_fb, _ = st.columns([0.5, 2, 2, 2, 0.5], gap="large")
+    with col_50:
+        if st.button(
+            "S&P 500 상위 50개\n빠른 스캔 시작",
+            type="primary",
+            width="stretch",
+            key="landing_btn_50",
+        ):
+            st.session_state["scan_mode"] = "빠른 분석 (시총 상위 50대 종목)"
+            st.session_state["app_view"] = "scanner"
+            st.session_state["entered_app"] = True
+            st.session_state.pop("selected_signal_ticker", None)
+            st.session_state.pop("selected_signal_combo", None)
+            st.rerun()
+
+    with col_500:
+        if st.button(
+            f"S&P 500 전체 ({total_sp500}개)\n전 종목 정밀 스캔",
+            type="primary",
+            width="stretch",
+            key="landing_btn_500",
+        ):
+            st.session_state["scan_mode"] = "S&P 500 전체 종목 스캔 (~500개)"
+            st.session_state["app_view"] = "scanner"
+            st.session_state["entered_app"] = True
+            st.session_state.pop("selected_signal_ticker", None)
+            st.session_state.pop("selected_signal_combo", None)
+            st.rerun()
+
+    with col_fb:
+        if st.button(
+            "자동 채점 · 피드백\n4대 트랙 실전 성적표",
+            type="primary",
+            width="stretch",
+            key="landing_btn_feedback",
+        ):
+            st.session_state["app_view"] = "feedback"
+            st.session_state["entered_app"] = True
+            st.rerun()
+
+
+def render_standalone_feedback_view(theme: Dict[str, str]) -> None:
+    """Render the dedicated Auto-Grading & 4-Track Feedback view without running stock scans."""
+    hdr1, hdr2 = st.columns([5, 1.3])
+    with hdr1:
+        st.title("자동 채점 및 4대 트랙 피드백 시스템")
+        st.caption(
+            "상위 50개 / 전체 500개 × 시장국면 ON / OFF 4개 트랙의 가상 매수 기록을 실제 주가로 자동 채점하고 성과를 비교합니다."
+        )
+    with hdr2:
+        st.write("")
+        if st.button("메인 화면으로", width="stretch", key="fb_standalone_home"):
+            st.session_state["entered_app"] = False
+            st.rerun()
+
+    sb_url, sb_key = load_saved_credentials()
+
+    sb_client = None
+    if sb_url and sb_key:
+        try:
+            sb_client = get_supabase_client(sb_url, sb_key)
+        except Exception:
+            st.error("데이터베이스 연결 초기화 중 오류가 발생했습니다.")
+
+    if sb_client is None:
+        render_supabase_setup_guide()
+        return
+
+    act_c1, act_c2 = st.columns([2, 1])
+    with act_c1:
+        if st.button(
+            "과거 기록 자동 채점 실행 (익절·손절 판정)",
+            type="primary",
+            width="stretch",
+            key="standalone_grade_btn",
+        ):
+            with st.spinner("진입가 매수 후 익절선/손절선 도달 여부를 실제 주가로 채점하는 중..."):
+                try:
+                    res_sum = grade_pending_signals(sb_client)
+                    st.success(
+                        f"채점 완료 — 총 {res_sum['checked']}건 | "
+                        f"익절 도달 {res_sum['wins']}건 | 손절 {res_sum['losses']}건 | "
+                        f"만기 청산 {res_sum['expired']}건 | 대기중 {res_sum['still_pending']}건"
+                    )
+                except Exception:
+                    st.error("자동 채점 실행 중 오류가 발생했습니다.")
+    with act_c2:
+        if st.button("DB 최신 데이터 새로고침", width="stretch", key="standalone_refresh_btn"):
+            st.rerun()
+
+    st.write("")
+    render_feedback_results(sb_client, theme)
+
+
 def main() -> None:
+    st.session_state.setdefault("entered_app", False)
+    st.session_state.setdefault("app_view", "scanner")
+    st.session_state.setdefault("theme_name", list(THEMES.keys())[0])
+    st.session_state.setdefault("scan_mode", "빠른 분석 (시총 상위 50대 종목)")
+
     constituents_df = cached_constituents()
     all_sectors = sorted(constituents_df["Sector"].dropna().unique().tolist())
 
+    if not st.session_state["entered_app"]:
+        theme = THEMES.get(st.session_state["theme_name"], THEMES[list(THEMES.keys())[0]])
+        apply_theme_css(theme)
+        render_landing_page(theme, total_sp500=len(constituents_df["Symbol"].unique()))
+        return
+
+    if st.session_state.get("app_view") == "feedback":
+        with st.sidebar:
+            if st.button("메인 화면으로 돌아가기", width="stretch", key="btn_back_home_fb"):
+                st.session_state["entered_app"] = False
+                st.rerun()
+            selected_theme_name = st.radio(
+                "화면 테마 선택",
+                options=list(THEMES.keys()),
+                key="theme_name",
+                horizontal=True,
+            )
+            theme = THEMES[selected_theme_name]
+            apply_theme_css(theme)
+        render_standalone_feedback_view(theme)
+        return
+
     # ---------------- SIDEBAR ----------------
     with st.sidebar:
+        if st.button("메인 화면으로 돌아가기", width="stretch", key="btn_back_home"):
+            st.session_state["entered_app"] = False
+            st.rerun()
+
         st.header("화면 테마 및 분석 설정")
 
         selected_theme_name = st.radio(
             "화면 테마 선택",
             options=list(THEMES.keys()),
-            index=0,
+            key="theme_name",
             horizontal=True,
             help="라이트 테마와 다크 테마를 즉시 전환할 수 있습니다.",
         )
@@ -803,7 +1295,7 @@ def main() -> None:
                 "S&P 500 전체 종목 스캔 (~500개)",
                 "직접 관심 티커 입력",
             ],
-            index=0,
+            key="scan_mode",
         )
 
         selected_tickers: List[str] = []
@@ -890,7 +1382,7 @@ def main() -> None:
                 help="향후 보유 기간 이내에 실적 발표가 있는 종목을 자동 제외합니다.",
             )
             use_feedback_weights = st.checkbox(
-                "Supabase 자가 피드백 가중치 자동 반영",
+                "실전 자가 피드백 가중치 자동 반영",
                 value=True,
                 help="실전 채점 결과 승률이 높은 기법 조합에 가산점을 부여합니다.",
             )
@@ -908,18 +1400,7 @@ def main() -> None:
 
         force_refresh = st.button("주가 데이터 새로고침 (캐시 갱신)", width="stretch")
 
-        st.divider()
-        saved_url, saved_key = load_saved_credentials()
-        with st.expander("Supabase DB 연결 (자가 피드백용)", expanded=not bool(saved_url and saved_key)):
-            sb_url = st.text_input("Supabase Project URL", value=saved_url, placeholder="https://xxxxx.supabase.co")
-            sb_key = st.text_input("Supabase API Key", value=saved_key, type="password", placeholder="anon public 또는 service_role 키")
-            if st.button("연결 테스트 및 저장", width="stretch"):
-                ok, msg = test_connection(sb_url, sb_key)
-                if ok:
-                    save_credentials(sb_url, sb_key)
-                    st.success(msg)
-                else:
-                    st.error(msg)
+    sb_url, sb_key = load_saved_credentials()
 
     # ---------------- MARKET CONTEXT & FEEDBACK WEIGHTS ----------------
     market_ctx_df, market_summary = fetch_market_context(period=period, use_cache=not force_refresh)
@@ -1104,7 +1585,7 @@ def main() -> None:
                     "최소 익절 도달 확률(%) 필터",
                     min_value=0,
                     max_value=95,
-                    value=55,
+                    value=70,
                     step=5,
                 )
             with f_col2:
@@ -1168,6 +1649,14 @@ def main() -> None:
                             """,
                             unsafe_allow_html=True,
                         )
+                        if st.button(
+                            f"{row['Ticker']} 차트 보기",
+                            key=f"btn_chart_top_{row['Ticker']}_{idx_c}",
+                            width="stretch",
+                        ):
+                            st.session_state["selected_signal_ticker"] = str(row["Ticker"])
+                            st.session_state["selected_signal_combo"] = str(row["ComboID"])
+                            st.session_state["tab_stock_ticker"] = str(row["Ticker"])
 
                 with st.expander("TOP 추천 종목 상세 매매 방법 (주문 순서) 보기", expanded=False):
                     for _, row in top_cards.iterrows():
@@ -1177,6 +1666,7 @@ def main() -> None:
                 st.write("")
                 show_extra_cols = st.checkbox("표에서 상세 지표(추격금지·비중·상대강도) 더 보기", value=False)
                 st.markdown("#### 포착 종목 전체 요약 표")
+                st.caption("표에서 종목 행을 클릭하거나 위 추천 카드의 '차트 보기' 버튼을 누르면 아래에 해당 종목의 차트가 즉시 표시됩니다.")
                 core_cols = [
                     "Ticker",
                     "기업명",
@@ -1198,10 +1688,13 @@ def main() -> None:
                     "마지막 발생일",
                 ]
                 display_cols = core_cols + extra_cols if show_extra_cols else core_cols
-                st.dataframe(
+                table_event = st.dataframe(
                     filtered_active[display_cols],
                     width="stretch",
                     hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="signals_table_sel",
                     column_config={
                         "Ticker": st.column_config.TextColumn("티커", width="small"),
                         "기업명": st.column_config.TextColumn("기업명", width="medium"),
@@ -1228,6 +1721,15 @@ def main() -> None:
                     },
                 )
 
+                sel_rows = table_event.selection.rows if table_event and table_event.selection else []
+                if sel_rows != st.session_state.get("_last_sig_table_rows", []):
+                    st.session_state["_last_sig_table_rows"] = list(sel_rows)
+                    if sel_rows and sel_rows[0] < len(filtered_active):
+                        clicked_row = filtered_active.iloc[sel_rows[0]]
+                        st.session_state["selected_signal_ticker"] = str(clicked_row["Ticker"])
+                        st.session_state["selected_signal_combo"] = str(clicked_row["ComboID"])
+                        st.session_state["tab_stock_ticker"] = str(clicked_row["Ticker"])
+
                 csv_bytes = filtered_active[display_cols].to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
                     "오늘의 시그널 및 익절·손절가 리스트 CSV 다운로드",
@@ -1235,6 +1737,105 @@ def main() -> None:
                     file_name=f"sp500_signals_tpsl_{hold_days}d.csv",
                     mime="text/csv",
                 )
+
+                # -------- Inline Quick Chart Preview for Clicked Signal --------
+                preview_ticker = st.session_state.get("selected_signal_ticker")
+                if preview_ticker and preview_ticker in filtered_active["Ticker"].values:
+                    st.divider()
+                    preview_row = filtered_active[filtered_active["Ticker"] == preview_ticker].iloc[0]
+                    preview_combo_id = str(preview_row["ComboID"])
+
+                    hdr_c1, hdr_c2, hdr_c3 = st.columns([4, 1.3, 1])
+                    with hdr_c1:
+                        st.markdown(
+                            f"#### {preview_ticker} ({preview_row['기업명']}) — 매수 시그널 및 익절·손절 차트"
+                        )
+                    with hdr_c2:
+                        preview_lookback = st.selectbox(
+                            "차트 기간",
+                            options=[120, 250, 500],
+                            index=1,
+                            format_func=lambda x: f"최근 {x}일",
+                            key="preview_chart_lookback",
+                            label_visibility="collapsed",
+                        )
+                    with hdr_c3:
+                        if st.button("차트 닫기", key="btn_close_preview_chart", width="stretch"):
+                            st.session_state.pop("selected_signal_ticker", None)
+                            st.session_state.pop("selected_signal_combo", None)
+                            st.rerun()
+
+                    render_kpi_row(
+                        [
+                            {
+                                "label": "매매기법 조합",
+                                "value": str(preview_row["매매기법 조합"]),
+                                "sub": f"익절 도달 확률 {preview_row['목표 도달 확률(%)']:.1f}% | 순수 승률 {preview_row['순수 승률(%)']:.1f}%",
+                                "color": theme["accent"],
+                            },
+                            {
+                                "label": "권장 진입가",
+                                "value": str(preview_row["권장 진입가"]).replace("$", "&#36;"),
+                                "sub": f"추격금지: {str(preview_row['추격금지 상한']).replace('$', '&#36;')}↑",
+                            },
+                            {
+                                "label": "맞춤 익절선",
+                                "value": f"&#36;{preview_row['익절가($)']:.2f}",
+                                "sub": f"+{preview_row['익절폭(+%)']:.2f}%",
+                                "color": theme["tp_color"],
+                            },
+                            {
+                                "label": "맞춤 손절선",
+                                "value": f"&#36;{preview_row['손절가($)']:.2f}",
+                                "sub": f"{preview_row['손절폭(-%)']:.2f}% (손익비 1:{preview_row['손익비(R:R)']:.2f})",
+                                "color": theme["sl_color"],
+                            },
+                        ]
+                    )
+
+                    p_df = stock_data.get(preview_ticker)
+                    if p_df is None or p_df.empty:
+                        p_df = fetch_single_stock(preview_ticker, period=period, use_cache=not force_refresh)
+                    if p_df is not None and len(p_df) >= 60:
+                        _, p_df_ind, p_combo_signals, p_outcomes_ctx = analyze_single_stock(
+                            df=p_df,
+                            ticker=preview_ticker,
+                            hold_days=hold_days,
+                            target_pct=target_pct,
+                            stop_pct=stop_pct,
+                            signal_window=signal_window,
+                            min_trades=min_trades,
+                            recent_signal_days=recent_signal_days,
+                            max_comb=max_comb,
+                            use_dynamic_tpsl=use_dynamic_tpsl,
+                            rr_multiplier=rr_multiplier,
+                            market_ctx_df=market_ctx_df,
+                            use_regime_filter=use_regime_filter,
+                            vix_max=vix_max,
+                            use_rs_filter=use_rs_filter,
+                            min_rs_pct=0.0,
+                            feedback_bonus_map=feedback_bonus_map,
+                        )
+                        p_trades_df = get_trade_history_for_combo(
+                            df_ind=p_df_ind,
+                            combo_signals=p_combo_signals,
+                            outcomes_ctx=p_outcomes_ctx,
+                            combo_id=preview_combo_id,
+                        )
+                        p_fig = build_candlestick_chart(
+                            df_ind=p_df_ind,
+                            trades_df=p_trades_df,
+                            ticker=preview_ticker,
+                            combo_name=str(preview_row["매매기법 조합"]),
+                            entry_price=float(preview_row["기준 진입가($)"]),
+                            tp_price=float(preview_row["익절가($)"]),
+                            tp_pct=float(preview_row["익절폭(+%)"]),
+                            sl_price=float(preview_row["손절가($)"]),
+                            sl_pct=float(preview_row["손절폭(-%)"]),
+                            theme=theme,
+                            lookback_bars=preview_lookback,
+                        )
+                        st.plotly_chart(p_fig, width="stretch")
 
     # =========================================================================
     # TAB 2: INDIVIDUAL STOCK DEEP-DIVE & INTERACTIVE TP/SL CHART
@@ -1244,11 +1845,13 @@ def main() -> None:
 
         col_sel1, col_sel2, col_sel3 = st.columns([2, 2, 1])
         avail_tickers = sorted(list(stock_data.keys()))
-        default_ticker = (
-            active_signals_df["Ticker"].iloc[0]
-            if not active_signals_df.empty
-            else ("NVDA" if "NVDA" in avail_tickers else avail_tickers[0])
-        )
+        synced_ticker = st.session_state.get("tab_stock_ticker")
+        if synced_ticker and synced_ticker in avail_tickers:
+            default_ticker = synced_ticker
+        elif not active_signals_df.empty:
+            default_ticker = active_signals_df["Ticker"].iloc[0]
+        else:
+            default_ticker = "NVDA" if "NVDA" in avail_tickers else avail_tickers[0]
 
         with col_sel1:
             chosen_ticker = st.selectbox(
@@ -1597,9 +2200,9 @@ def main() -> None:
     # TAB 4: SUPABASE SELF-FEEDBACK & AUTO-GRADING
     # =========================================================================
     with tab_feedback:
-        st.subheader("자가 피드백 및 예측 자동 채점 시스템 (Supabase)")
+        st.subheader("자가 피드백 및 예측 자동 채점 시스템")
         st.caption(
-            "포착된 매수 시그널을 Supabase DB에 저장하고, 며칠 뒤 실제 주가로 성공/손절 여부를 자동 채점하여 "
+            "포착된 매수 시그널을 데이터베이스에 저장하고, 실제 주가로 성공/손절 여부를 자동 채점하여 "
             "각 매매기법 조합의 실전 적중률과 피드백 가중치를 스스로 업데이트합니다."
         )
 
@@ -1607,28 +2210,11 @@ def main() -> None:
         if sb_url and sb_key:
             try:
                 sb_client = get_supabase_client(sb_url, sb_key)
-            except Exception as exc:
-                st.error(f"Supabase 클라이언트 초기화 오류: {exc}")
+            except Exception:
+                st.error("데이터베이스 연결 초기화 중 오류가 발생했습니다.")
 
         if sb_client is None:
-            st.info(
-                "아직 Supabase가 연결되지 않았습니다. 아래 3단계 순서대로 연결하시면 바로 자가 피드백 기능을 사용할 수 있습니다."
-            )
-            st.markdown(
-                """
-                1. **테이블 생성**: Supabase 대시보드 좌측 메뉴의 **SQL Editor -> New query**로 이동한 뒤, 아래 SQL을 복사해 붙여넣고 **Run**을 누르세요.
-                2. **API 키 확인**: Supabase 대시보드 좌측 하단 **Project Settings -> Data API (또는 API)**에서 **Project URL**과 **anon public key**를 복사하세요.
-                3. **연결 저장**: 이 화면 좌측 사이드바의 **Supabase DB 연결 (자가 피드백용)** 칸에 URL과 Key를 붙여넣고 **연결 테스트 및 저장**을 누르세요.
-                """
-            )
-            try:
-                from pathlib import Path
-
-                schema_sql = (Path(__file__).resolve().parent / "supabase_schema.sql").read_text(encoding="utf-8")
-                with st.expander("supabase_schema.sql 내용 보기 (복사용)", expanded=True):
-                    st.code(schema_sql, language="sql")
-            except Exception:
-                pass
+            render_supabase_setup_guide()
         else:
             fb_min_prob = st.slider(
                 "가상 매수 기록 최소 익절 도달 확률 (%)",
@@ -1638,10 +2224,14 @@ def main() -> None:
                 step=5,
                 help="설정한 확률 이상인 시그널만 진입가에 매수했다고 가정하여 DB에 기록하고 익절/손절 도달 여부를 추적합니다.",
             )
+            is_cur_top50 = scan_mode.startswith("빠른")
+            cur_scope_code = "TOP50" if is_cur_top50 else "ALL"
+            cur_scope_name = "상위 50개" if is_cur_top50 else "전체 종목"
+            cur_ver_label = "국면 ON" if use_regime_filter else "국면 OFF"
+
             col_fb_btn1, col_fb_btn2, col_fb_btn3 = st.columns(3)
             with col_fb_btn1:
-                cur_ver_label = "필터 ON" if use_regime_filter else "필터 OFF"
-                if st.button(f"현재({cur_ver_label}) {fb_min_prob}%↑ 가상 매수 기록", width="stretch"):
+                if st.button(f"현재({cur_scope_name} · {cur_ver_label}) {fb_min_prob}%↑ 기록", width="stretch"):
                     if active_signals_df.empty:
                         st.warning("현재 포착된 시그널이 없어 저장할 항목이 없습니다.")
                     else:
@@ -1653,19 +2243,53 @@ def main() -> None:
                                 min_prob=float(fb_min_prob),
                                 regime_filter_on=use_regime_filter,
                                 rs_filter_on=use_rs_filter,
+                                universe_scope=cur_scope_code,
                             )
                             if saved_cnt == 0:
                                 st.info(f"익절 도달 확률 {fb_min_prob}% 이상인 현재 시그널이 없습니다.")
                             else:
-                                st.success(f"[{cur_ver_label}] {fb_min_prob}%↑ 시그널 {saved_cnt}건을 가상 매수(PENDING)로 기록했습니다.")
+                                st.success(
+                                    f"[{cur_scope_name} · {cur_ver_label}] {fb_min_prob}%↑ 시그널 {saved_cnt}건을 "
+                                    "가상 매수(PENDING)로 기록했습니다."
+                                )
                         except Exception as exc:
                             st.error(f"시그널 저장 오류: {exc}")
 
             with col_fb_btn2:
-                if st.button(f"두 버전(ON + OFF) 동시 기록 ({fb_min_prob}%↑)", width="stretch"):
-                    with st.spinner("시장국면 필터 ON/OFF 두 버전을 모두 스캔하여 DB에 기록하는 중..."):
+                if st.button(
+                    f"4대 트랙 동시 기록 ({fb_min_prob}%↑)",
+                    width="stretch",
+                    help="상위 50 종목(국면 ON/OFF)과 전체 종목(국면 ON/OFF) 총 4개 트랙을 한 번에 스캔하여 DB에 기록합니다.",
+                ):
+                    with st.spinner("4개 트랙(상위 50 ON/OFF + 전체 종목 ON/OFF)을 스캔하여 DB에 기록하는 중..."):
                         try:
-                            act_on, _, _ = scan_market(
+                            # 1) Top 50 Universe
+                            stock_data_top50 = {t: stock_data[t] for t in TOP_50_TICKERS if t in stock_data}
+                            if not stock_data_top50:
+                                stock_data_top50 = fetch_multiple_stocks(TOP_50_TICKERS, period=period, use_cache=True)
+                            const_top50 = constituents_df[constituents_df["Symbol"].isin(TOP_50_TICKERS)]
+
+                            act_top50_on, _, _ = scan_market(
+                                stock_data=stock_data_top50, constituents_df=const_top50,
+                                hold_days=hold_days, target_pct=target_pct, stop_pct=stop_pct,
+                                signal_window=signal_window, min_trades=min_trades,
+                                recent_signal_days=recent_signal_days, max_comb=max_comb,
+                                use_dynamic_tpsl=use_dynamic_tpsl, rr_multiplier=rr_multiplier,
+                                market_ctx_df=market_ctx_df, use_regime_filter=True, vix_max=vix_max,
+                                use_rs_filter=use_rs_filter, feedback_bonus_map=feedback_bonus_map,
+                            )
+                            act_top50_off, _, _ = scan_market(
+                                stock_data=stock_data_top50, constituents_df=const_top50,
+                                hold_days=hold_days, target_pct=target_pct, stop_pct=stop_pct,
+                                signal_window=signal_window, min_trades=min_trades,
+                                recent_signal_days=recent_signal_days, max_comb=max_comb,
+                                use_dynamic_tpsl=use_dynamic_tpsl, rr_multiplier=rr_multiplier,
+                                market_ctx_df=market_ctx_df, use_regime_filter=False, vix_max=vix_max,
+                                use_rs_filter=use_rs_filter, feedback_bonus_map=feedback_bonus_map,
+                            )
+
+                            # 2) Full Universe (Current stock_data)
+                            act_all_on, _, _ = scan_market(
                                 stock_data=stock_data, constituents_df=constituents_df,
                                 hold_days=hold_days, target_pct=target_pct, stop_pct=stop_pct,
                                 signal_window=signal_window, min_trades=min_trades,
@@ -1674,7 +2298,7 @@ def main() -> None:
                                 market_ctx_df=market_ctx_df, use_regime_filter=True, vix_max=vix_max,
                                 use_rs_filter=use_rs_filter, feedback_bonus_map=feedback_bonus_map,
                             )
-                            act_off, _, _ = scan_market(
+                            act_all_off, _, _ = scan_market(
                                 stock_data=stock_data, constituents_df=constituents_df,
                                 hold_days=hold_days, target_pct=target_pct, stop_pct=stop_pct,
                                 signal_window=signal_window, min_trades=min_trades,
@@ -1683,17 +2307,35 @@ def main() -> None:
                                 market_ctx_df=market_ctx_df, use_regime_filter=False, vix_max=vix_max,
                                 use_rs_filter=use_rs_filter, feedback_bonus_map=feedback_bonus_map,
                             )
-                            cnt_on = save_signals_to_db(
-                                sb_client, act_on, hold_days=hold_days,
-                                min_prob=float(fb_min_prob), regime_filter_on=True, rs_filter_on=use_rs_filter,
+
+                            # Save all 4 tracks
+                            cnt_t50_on = save_signals_to_db(
+                                sb_client, act_top50_on, hold_days=hold_days,
+                                min_prob=float(fb_min_prob), regime_filter_on=True,
+                                rs_filter_on=use_rs_filter, universe_scope="TOP50",
                             )
-                            cnt_off = save_signals_to_db(
-                                sb_client, act_off, hold_days=hold_days,
-                                min_prob=float(fb_min_prob), regime_filter_on=False, rs_filter_on=use_rs_filter,
+                            cnt_t50_off = save_signals_to_db(
+                                sb_client, act_top50_off, hold_days=hold_days,
+                                min_prob=float(fb_min_prob), regime_filter_on=False,
+                                rs_filter_on=use_rs_filter, universe_scope="TOP50",
                             )
-                            st.success(f"동시 기록 완료 — 필터 ON: {cnt_on}건 | 필터 OFF: {cnt_off}건 저장됨")
+                            cnt_all_on = save_signals_to_db(
+                                sb_client, act_all_on, hold_days=hold_days,
+                                min_prob=float(fb_min_prob), regime_filter_on=True,
+                                rs_filter_on=use_rs_filter, universe_scope="ALL",
+                            )
+                            cnt_all_off = save_signals_to_db(
+                                sb_client, act_all_off, hold_days=hold_days,
+                                min_prob=float(fb_min_prob), regime_filter_on=False,
+                                rs_filter_on=use_rs_filter, universe_scope="ALL",
+                            )
+                            st.success(
+                                f"4대 트랙 동시 기록 완료 — "
+                                f"상위50 국면ON: {cnt_t50_on}건 | 상위50 국면OFF: {cnt_t50_off}건 | "
+                                f"전체 국면ON: {cnt_all_on}건 | 전체 국면OFF: {cnt_all_off}건"
+                            )
                         except Exception as exc:
-                            st.error(f"동시 기록 오류: {exc}")
+                            st.error(f"4대 트랙 동시 기록 오류: {exc}")
 
             with col_fb_btn3:
                 if st.button("과거 기록 자동 채점 (익절·손절 판정)", width="stretch"):
@@ -1708,182 +2350,7 @@ def main() -> None:
                         except Exception as exc:
                             st.error(f"자동 채점 오류: {exc}")
 
-            try:
-                logs_df = fetch_signal_logs(sb_client, limit=200)
-                fb_df = fetch_strategy_feedback(sb_client)
-                baseline_cnt = fetch_baseline_count(sb_client)
-
-                total_logs = len(logs_df)
-                pending_cnt = int((logs_df["status"] == "PENDING").sum()) if not logs_df.empty else 0
-                graded_df = logs_df[logs_df["status"] != "PENDING"] if not logs_df.empty else pd.DataFrame()
-                graded_cnt = len(graded_df)
-                live_win_rate = (
-                    round(float(graded_df["status"].isin(["WIN", "EXPIRED_WIN"]).mean() * 100.0), 1)
-                    if graded_cnt > 0
-                    else 0.0
-                )
-
-                render_kpi_row(
-                    [
-                        {"label": "Colab 초반 학습 데이터", "value": f"{baseline_cnt:,}건", "sub": "strategy_baseline 테이블"},
-                        {"label": "누적 시그널 기록", "value": f"{total_logs}건", "sub": f"채점 대기중(PENDING): {pending_cnt}건"},
-                        {"label": "자동 채점 완료", "value": f"{graded_cnt}건", "sub": "실제 주가 기반 승패 판정 완료", "color": theme["accent"]},
-                        {"label": "실전 누적 승률", "value": f"{live_win_rate:.1f}%" if graded_cnt > 0 else "-", "sub": "채점 완료 건 기준 실제 승률", "color": theme["tp_color"]},
-                    ]
-                )
-
-                st.write("")
-                fb_tab1, fb_tab2, fb_tab3 = st.tabs(
-                    [
-                        "시장국면 필터 ON vs OFF 성과 비교",
-                        "기법 조합별 자가 피드백 가중치",
-                        "가상 매매 기록 및 채점 상세 로그",
-                    ]
-                )
-                with fb_tab1:
-                    comp_df = compute_regime_comparison(logs_df)
-                    if comp_df.empty:
-                        st.info(
-                            "아직 채점이 완료된 필터 비교 데이터가 없습니다. "
-                            "'두 버전(ON + OFF) 동시 기록' 버튼으로 시그널을 기록한 뒤 기간이 지나면 이곳에서 두 버전의 실제 적중률을 비교할 수 있습니다."
-                        )
-                    else:
-                        st.dataframe(
-                            comp_df,
-                            width="stretch",
-                            hide_index=True,
-                            column_config={
-                                "익절 적중률(%)": st.column_config.ProgressColumn(
-                                    "익절 적중률", format="%.1f%%", min_value=0, max_value=100
-                                ),
-                                "전체 승률(%)": st.column_config.ProgressColumn(
-                                    "전체 승률", format="%.1f%%", min_value=0, max_value=100
-                                ),
-                                "평균 수익률(%)": st.column_config.NumberColumn("평균 수익률", format="%+.2f%%"),
-                            },
-                        )
-
-                with fb_tab2:
-                    if fb_df.empty:
-                        st.info("아직 채점이 완료된 기록이 없습니다. 시그널을 저장하고 기간이 지난 뒤 '자동 채점'을 실행하면 기법별 피드백 가중치가 자동 계산됩니다.")
-                    else:
-                        st.dataframe(
-                            fb_df[
-                                [
-                                    "combo_name",
-                                    "total_graded",
-                                    "wins",
-                                    "losses",
-                                    "live_win_rate",
-                                    "avg_live_return",
-                                    "feedback_bonus",
-                                    "updated_at",
-                                ]
-                            ],
-                            width="stretch",
-                            hide_index=True,
-                            column_config={
-                                "combo_name": st.column_config.TextColumn("매매기법 조합"),
-                                "total_graded": st.column_config.NumberColumn("채점 수"),
-                                "wins": st.column_config.NumberColumn("성공"),
-                                "losses": st.column_config.NumberColumn("실패"),
-                                "live_win_rate": st.column_config.NumberColumn("실전 승률", format="%.1f%%"),
-                                "avg_live_return": st.column_config.NumberColumn("평균 실전수익", format="%+.2f%%"),
-                                "feedback_bonus": st.column_config.NumberColumn("피드백 가중치", format="%+.2f"),
-                            },
-                        )
-
-                with fb_tab3:
-                    if logs_df.empty:
-                        st.info("저장된 시그널 기록이 없습니다. 상단의 가상 매수 기록 버튼을 눌러보세요.")
-                    else:
-                        status_label_map = {
-                            "WIN": "적중 (O) - 익절 도달",
-                            "EXPIRED_WIN": "적중 (O) - 만기 수익",
-                            "LOSS": "실패 (X) - 손절 이탈",
-                            "EXPIRED_LOSS": "실패 (X) - 만기 손실",
-                            "PENDING": "진행중 (대기)",
-                        }
-                        logs_view = logs_df.copy()
-                        logs_view["예측 판정"] = logs_view["status"].map(
-                            lambda s: status_label_map.get(str(s), str(s))
-                        )
-                        if "regime_filter_on" in logs_view.columns:
-                            logs_view["필터 버전"] = logs_view["regime_filter_on"].map(
-                                lambda v: "필터 ON" if bool(v) else "필터 OFF"
-                            )
-                        else:
-                            logs_view["필터 버전"] = "필터 ON"
-
-                        if "exit_date" not in logs_view.columns:
-                            logs_view["exit_date"] = "-"
-                        if "days_held" not in logs_view.columns:
-                            logs_view["days_held"] = None
-
-                        f_r1, f_r2 = st.columns(2)
-                        with f_r1:
-                            filter_choice = st.radio(
-                                "예측 결과 필터",
-                                options=["전체", "적중 (O)만 보기", "실패 (X)만 보기", "진행중 (대기)만 보기"],
-                                horizontal=True,
-                            )
-                        with f_r2:
-                            ver_choice = st.radio(
-                                "시장국면 필터 버전",
-                                options=["전체 버전", "필터 ON만", "필터 OFF만"],
-                                horizontal=True,
-                            )
-
-                        if filter_choice.startswith("적중"):
-                            logs_view = logs_view[logs_view["status"].isin(["WIN", "EXPIRED_WIN"])]
-                        elif filter_choice.startswith("실패"):
-                            logs_view = logs_view[logs_view["status"].isin(["LOSS", "EXPIRED_LOSS"])]
-                        elif filter_choice.startswith("진행중"):
-                            logs_view = logs_view[logs_view["status"] == "PENDING"]
-
-                        if ver_choice == "필터 ON만":
-                            logs_view = logs_view[logs_view["필터 버전"] == "필터 ON"]
-                        elif ver_choice == "필터 OFF만":
-                            logs_view = logs_view[logs_view["필터 버전"] == "필터 OFF"]
-
-                        st.dataframe(
-                            logs_view[
-                                [
-                                    "signal_date",
-                                    "ticker",
-                                    "필터 버전",
-                                    "combo_name",
-                                    "예측 판정",
-                                    "entry_price",
-                                    "tp_price",
-                                    "sl_price",
-                                    "predicted_hit_rate",
-                                    "exit_price",
-                                    "exit_date",
-                                    "days_held",
-                                    "actual_return",
-                                ]
-                            ],
-                            width="stretch",
-                            hide_index=True,
-                            column_config={
-                                "signal_date": st.column_config.TextColumn("매수(시그널)일"),
-                                "ticker": st.column_config.TextColumn("티커"),
-                                "필터 버전": st.column_config.TextColumn("필터 버전"),
-                                "combo_name": st.column_config.TextColumn("매매기법 조합"),
-                                "예측 판정": st.column_config.TextColumn("예측 판정"),
-                                "entry_price": st.column_config.NumberColumn("매수 진입가", format="$%.2f"),
-                                "tp_price": st.column_config.NumberColumn("익절선", format="$%.2f"),
-                                "sl_price": st.column_config.NumberColumn("손절선", format="$%.2f"),
-                                "predicted_hit_rate": st.column_config.NumberColumn("예측 확률", format="%.1f%%"),
-                                "exit_price": st.column_config.NumberColumn("매도(청산)가", format="$%.2f"),
-                                "exit_date": st.column_config.TextColumn("매도일"),
-                                "days_held": st.column_config.NumberColumn("보유일"),
-                                "actual_return": st.column_config.NumberColumn("실제 수익률", format="%+.2f%%"),
-                            },
-                        )
-            except Exception as exc:
-                st.warning(f"Supabase 테이블을 불러오지 못했습니다. supabase_schema.sql 실행 여부를 확인해 주세요. ({exc})")
+            render_feedback_results(sb_client, theme)
 
     # =========================================================================
     # TAB 5: STRATEGY & TP/SL GUIDE
