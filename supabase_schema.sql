@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS strategy_baseline (
     PRIMARY KEY (ticker, combo_id)
 );
 
--- 2. 매수 시그널 예측 기록 및 자동 채점 테이블
+-- 2. 매수 시그널 가상 매매 기록 및 자동 채점 테이블
 CREATE TABLE IF NOT EXISTS signal_logs (
     id BIGSERIAL PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -28,13 +28,26 @@ CREATE TABLE IF NOT EXISTS signal_logs (
     sl_price DOUBLE PRECISION NOT NULL,
     hold_days INTEGER NOT NULL DEFAULT 10,
     predicted_hit_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+    regime_filter_on BOOLEAN NOT NULL DEFAULT TRUE,
+    rs_filter_on BOOLEAN NOT NULL DEFAULT TRUE,
     status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | WIN | LOSS | EXPIRED_WIN | EXPIRED_LOSS
     actual_return DOUBLE PRECISION,
     exit_price DOUBLE PRECISION,
+    exit_date DATE,
+    days_held INTEGER,
     graded_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (ticker, combo_id, signal_date)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 기존 테이블이 이미 있는 경우 새 컬럼 안전 추가 및 복합 유니크 인덱스 생성
+ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS regime_filter_on BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS rs_filter_on BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS exit_date DATE;
+ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS days_held INTEGER;
+
+ALTER TABLE signal_logs DROP CONSTRAINT IF EXISTS signal_logs_ticker_combo_id_signal_date_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_logs_unique_regime
+    ON signal_logs (ticker, combo_id, signal_date, regime_filter_on);
 
 -- 3. 기법 조합별 실전 채점 기반 자가 피드백 가중치 테이블
 CREATE TABLE IF NOT EXISTS strategy_feedback (
@@ -49,8 +62,7 @@ CREATE TABLE IF NOT EXISTS strategy_feedback (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 개인 프로젝트용 RLS 비활성화 (anon key 로도 읽기/쓰기 가능하도록 설정)
+-- 개인 프로젝트용 RLS 비활성화 (anon/publishable key 로 읽기/쓰기 가능)
 ALTER TABLE strategy_baseline DISABLE ROW LEVEL SECURITY;
 ALTER TABLE signal_logs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE strategy_feedback DISABLE ROW LEVEL SECURITY;
-

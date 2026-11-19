@@ -45,6 +45,7 @@ from src.data_loader import (
     normalize_ticker,
 )
 from src.feedback_db import (
+    compute_regime_comparison,
     fetch_baseline_count,
     fetch_signal_logs,
     fetch_strategy_feedback,
@@ -876,12 +877,7 @@ def main() -> None:
             stop_pct_abs = st.slider("고정 손절 기준 (-%)", 1.5, 15.0, 4.0, 0.5)
             stop_pct = -float(stop_pct_abs)
 
-        with st.expander("3. 승률 향상 실전 필터 (시장·상대강도·실적·피드백)", expanded=False):
-            use_regime_filter = st.checkbox(
-                "시장 국면 필터 (SPY 200일선 위 & VIX 안정장만 매수)",
-                value=True,
-                help="하락장이나 공포지수 급등장에서는 매수 시그널을 걸러내어 승률을 크게 높입니다.",
-            )
+        with st.expander("3. 승률 향상 실전 필터 (VIX·상대강도·실적·피드백)", expanded=False):
             vix_max = st.slider("VIX 공포지수 상한선", min_value=18.0, max_value=40.0, value=26.0, step=1.0)
             use_rs_filter = st.checkbox(
                 "상대강도(RS) 우수 종목만 선별 (SPY 60일 수익률 초과)",
@@ -941,7 +937,7 @@ def main() -> None:
         except Exception:
             feedback_bonus_map = {}
 
-    # ---------------- HEADER ----------------
+    # ---------------- HEADER & MARKET REGIME TOGGLE ----------------
     col_hdr1, col_hdr2 = st.columns([5, 1.3])
     with col_hdr1:
         st.title("S&P 500 매매기법 조합 확률 및 익절·손절 분석기")
@@ -962,6 +958,17 @@ def main() -> None:
                 """,
                 height=0,
             )
+
+    regime_choice = st.radio(
+        "시장국면 필터 버전 선택 (ON / OFF 비교 가능)",
+        options=[
+            "시장국면 필터 ON (SPY 200일선 위 + VIX 안정장만 매수)",
+            "시장국면 필터 OFF (모든 장세에서 시그널 포착)",
+        ],
+        index=0,
+        horizontal=True,
+    )
+    use_regime_filter = regime_choice.startswith("시장국면 필터 ON")
     tpsl_label = "기법별 맞춤 익절·손절" if use_dynamic_tpsl else f"고정 익절 +{target_pct}% / 손절 {stop_pct}%"
     regime_text = (
         f"SPY &#36;{market_summary['spy_close']} / VIX {market_summary['vix_close']} ({market_summary['regime_label']})"
@@ -1623,26 +1630,79 @@ def main() -> None:
             except Exception:
                 pass
         else:
-            col_fb_btn1, col_fb_btn2 = st.columns(2)
+            fb_min_prob = st.slider(
+                "가상 매수 기록 최소 익절 도달 확률 (%)",
+                min_value=50,
+                max_value=95,
+                value=70,
+                step=5,
+                help="설정한 확률 이상인 시그널만 진입가에 매수했다고 가정하여 DB에 기록하고 익절/손절 도달 여부를 추적합니다.",
+            )
+            col_fb_btn1, col_fb_btn2, col_fb_btn3 = st.columns(3)
             with col_fb_btn1:
-                if st.button("오늘 포착된 매수 시그널 DB에 기록하기", width="stretch"):
+                cur_ver_label = "필터 ON" if use_regime_filter else "필터 OFF"
+                if st.button(f"현재({cur_ver_label}) {fb_min_prob}%↑ 가상 매수 기록", width="stretch"):
                     if active_signals_df.empty:
                         st.warning("현재 포착된 시그널이 없어 저장할 항목이 없습니다.")
                     else:
                         try:
-                            saved_cnt = save_signals_to_db(sb_client, active_signals_df, hold_days=hold_days)
-                            st.success(f"오늘의 고승률 시그널 상위 {saved_cnt}건을 Supabase signal_logs 에 기록했습니다.")
+                            saved_cnt = save_signals_to_db(
+                                sb_client,
+                                active_signals_df,
+                                hold_days=hold_days,
+                                min_prob=float(fb_min_prob),
+                                regime_filter_on=use_regime_filter,
+                                rs_filter_on=use_rs_filter,
+                            )
+                            if saved_cnt == 0:
+                                st.info(f"익절 도달 확률 {fb_min_prob}% 이상인 현재 시그널이 없습니다.")
+                            else:
+                                st.success(f"[{cur_ver_label}] {fb_min_prob}%↑ 시그널 {saved_cnt}건을 가상 매수(PENDING)로 기록했습니다.")
                         except Exception as exc:
                             st.error(f"시그널 저장 오류: {exc}")
 
             with col_fb_btn2:
-                if st.button("과거 예측 자동 채점 및 자가 피드백 갱신", width="stretch"):
-                    with st.spinner("진행중(PENDING) 예측들을 최신 주가로 자동 채점하는 중..."):
+                if st.button(f"두 버전(ON + OFF) 동시 기록 ({fb_min_prob}%↑)", width="stretch"):
+                    with st.spinner("시장국면 필터 ON/OFF 두 버전을 모두 스캔하여 DB에 기록하는 중..."):
+                        try:
+                            act_on, _, _ = scan_market(
+                                stock_data=stock_data, constituents_df=constituents_df,
+                                hold_days=hold_days, target_pct=target_pct, stop_pct=stop_pct,
+                                signal_window=signal_window, min_trades=min_trades,
+                                recent_signal_days=recent_signal_days, max_comb=max_comb,
+                                use_dynamic_tpsl=use_dynamic_tpsl, rr_multiplier=rr_multiplier,
+                                market_ctx_df=market_ctx_df, use_regime_filter=True, vix_max=vix_max,
+                                use_rs_filter=use_rs_filter, feedback_bonus_map=feedback_bonus_map,
+                            )
+                            act_off, _, _ = scan_market(
+                                stock_data=stock_data, constituents_df=constituents_df,
+                                hold_days=hold_days, target_pct=target_pct, stop_pct=stop_pct,
+                                signal_window=signal_window, min_trades=min_trades,
+                                recent_signal_days=recent_signal_days, max_comb=max_comb,
+                                use_dynamic_tpsl=use_dynamic_tpsl, rr_multiplier=rr_multiplier,
+                                market_ctx_df=market_ctx_df, use_regime_filter=False, vix_max=vix_max,
+                                use_rs_filter=use_rs_filter, feedback_bonus_map=feedback_bonus_map,
+                            )
+                            cnt_on = save_signals_to_db(
+                                sb_client, act_on, hold_days=hold_days,
+                                min_prob=float(fb_min_prob), regime_filter_on=True, rs_filter_on=use_rs_filter,
+                            )
+                            cnt_off = save_signals_to_db(
+                                sb_client, act_off, hold_days=hold_days,
+                                min_prob=float(fb_min_prob), regime_filter_on=False, rs_filter_on=use_rs_filter,
+                            )
+                            st.success(f"동시 기록 완료 — 필터 ON: {cnt_on}건 | 필터 OFF: {cnt_off}건 저장됨")
+                        except Exception as exc:
+                            st.error(f"동시 기록 오류: {exc}")
+
+            with col_fb_btn3:
+                if st.button("과거 기록 자동 채점 (익절·손절 판정)", width="stretch"):
+                    with st.spinner("진입가 매수 후 익절선/손절선 도달 여부를 실제 주가로 채점하는 중..."):
                         try:
                             res_sum = grade_pending_signals(sb_client)
                             st.success(
-                                f"채점 완료 — 총 확인 {res_sum['checked']}건 | "
-                                f"익절 성공 {res_sum['wins']}건 | 손절 {res_sum['losses']}건 | "
+                                f"채점 완료 — 총 {res_sum['checked']}건 | "
+                                f"익절 도달 {res_sum['wins']}건 | 손절 {res_sum['losses']}건 | "
                                 f"만기 청산 {res_sum['expired']}건 | 대기중 {res_sum['still_pending']}건"
                             )
                         except Exception as exc:
@@ -1673,8 +1733,37 @@ def main() -> None:
                 )
 
                 st.write("")
-                fb_tab1, fb_tab2 = st.tabs(["기법 조합별 자가 피드백 가중치", "예측 기록 및 채점 상세 로그"])
+                fb_tab1, fb_tab2, fb_tab3 = st.tabs(
+                    [
+                        "시장국면 필터 ON vs OFF 성과 비교",
+                        "기법 조합별 자가 피드백 가중치",
+                        "가상 매매 기록 및 채점 상세 로그",
+                    ]
+                )
                 with fb_tab1:
+                    comp_df = compute_regime_comparison(logs_df)
+                    if comp_df.empty:
+                        st.info(
+                            "아직 채점이 완료된 필터 비교 데이터가 없습니다. "
+                            "'두 버전(ON + OFF) 동시 기록' 버튼으로 시그널을 기록한 뒤 기간이 지나면 이곳에서 두 버전의 실제 적중률을 비교할 수 있습니다."
+                        )
+                    else:
+                        st.dataframe(
+                            comp_df,
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "익절 적중률(%)": st.column_config.ProgressColumn(
+                                    "익절 적중률", format="%.1f%%", min_value=0, max_value=100
+                                ),
+                                "전체 승률(%)": st.column_config.ProgressColumn(
+                                    "전체 승률", format="%.1f%%", min_value=0, max_value=100
+                                ),
+                                "평균 수익률(%)": st.column_config.NumberColumn("평균 수익률", format="%+.2f%%"),
+                            },
+                        )
+
+                with fb_tab2:
                     if fb_df.empty:
                         st.info("아직 채점이 완료된 기록이 없습니다. 시그널을 저장하고 기간이 지난 뒤 '자동 채점'을 실행하면 기법별 피드백 가중치가 자동 계산됩니다.")
                     else:
@@ -1704,9 +1793,9 @@ def main() -> None:
                             },
                         )
 
-                with fb_tab2:
+                with fb_tab3:
                     if logs_df.empty:
-                        st.info("저장된 시그널 기록이 없습니다. 상단의 '오늘 포착된 매수 시그널 DB에 기록하기' 버튼을 눌러보세요.")
+                        st.info("저장된 시그널 기록이 없습니다. 상단의 가상 매수 기록 버튼을 눌러보세요.")
                     else:
                         status_label_map = {
                             "WIN": "적중 (O) - 익절 도달",
@@ -1719,11 +1808,32 @@ def main() -> None:
                         logs_view["예측 판정"] = logs_view["status"].map(
                             lambda s: status_label_map.get(str(s), str(s))
                         )
-                        filter_choice = st.radio(
-                            "예측 결과 필터",
-                            options=["전체", "적중 (O)만 보기", "실패 (X)만 보기", "진행중 (대기)만 보기"],
-                            horizontal=True,
-                        )
+                        if "regime_filter_on" in logs_view.columns:
+                            logs_view["필터 버전"] = logs_view["regime_filter_on"].map(
+                                lambda v: "필터 ON" if bool(v) else "필터 OFF"
+                            )
+                        else:
+                            logs_view["필터 버전"] = "필터 ON"
+
+                        if "exit_date" not in logs_view.columns:
+                            logs_view["exit_date"] = "-"
+                        if "days_held" not in logs_view.columns:
+                            logs_view["days_held"] = None
+
+                        f_r1, f_r2 = st.columns(2)
+                        with f_r1:
+                            filter_choice = st.radio(
+                                "예측 결과 필터",
+                                options=["전체", "적중 (O)만 보기", "실패 (X)만 보기", "진행중 (대기)만 보기"],
+                                horizontal=True,
+                            )
+                        with f_r2:
+                            ver_choice = st.radio(
+                                "시장국면 필터 버전",
+                                options=["전체 버전", "필터 ON만", "필터 OFF만"],
+                                horizontal=True,
+                            )
+
                         if filter_choice.startswith("적중"):
                             logs_view = logs_view[logs_view["status"].isin(["WIN", "EXPIRED_WIN"])]
                         elif filter_choice.startswith("실패"):
@@ -1731,11 +1841,17 @@ def main() -> None:
                         elif filter_choice.startswith("진행중"):
                             logs_view = logs_view[logs_view["status"] == "PENDING"]
 
+                        if ver_choice == "필터 ON만":
+                            logs_view = logs_view[logs_view["필터 버전"] == "필터 ON"]
+                        elif ver_choice == "필터 OFF만":
+                            logs_view = logs_view[logs_view["필터 버전"] == "필터 OFF"]
+
                         st.dataframe(
                             logs_view[
                                 [
                                     "signal_date",
                                     "ticker",
+                                    "필터 버전",
                                     "combo_name",
                                     "예측 판정",
                                     "entry_price",
@@ -1743,21 +1859,26 @@ def main() -> None:
                                     "sl_price",
                                     "predicted_hit_rate",
                                     "exit_price",
+                                    "exit_date",
+                                    "days_held",
                                     "actual_return",
                                 ]
                             ],
                             width="stretch",
                             hide_index=True,
                             column_config={
-                                "signal_date": st.column_config.TextColumn("시그널 일자"),
+                                "signal_date": st.column_config.TextColumn("매수(시그널)일"),
                                 "ticker": st.column_config.TextColumn("티커"),
+                                "필터 버전": st.column_config.TextColumn("필터 버전"),
                                 "combo_name": st.column_config.TextColumn("매매기법 조합"),
-                                "예측 판정": st.column_config.TextColumn("예측 판정 (맞았는지/틀렸는지)"),
-                                "entry_price": st.column_config.NumberColumn("진입가", format="$%.2f"),
+                                "예측 판정": st.column_config.TextColumn("예측 판정"),
+                                "entry_price": st.column_config.NumberColumn("매수 진입가", format="$%.2f"),
                                 "tp_price": st.column_config.NumberColumn("익절선", format="$%.2f"),
                                 "sl_price": st.column_config.NumberColumn("손절선", format="$%.2f"),
                                 "predicted_hit_rate": st.column_config.NumberColumn("예측 확률", format="%.1f%%"),
-                                "exit_price": st.column_config.NumberColumn("실제 청산가", format="$%.2f"),
+                                "exit_price": st.column_config.NumberColumn("매도(청산)가", format="$%.2f"),
+                                "exit_date": st.column_config.TextColumn("매도일"),
+                                "days_held": st.column_config.NumberColumn("보유일"),
                                 "actual_return": st.column_config.NumberColumn("실제 수익률", format="%+.2f%%"),
                             },
                         )
