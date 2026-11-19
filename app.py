@@ -1557,7 +1557,7 @@ def main() -> None:
         render_kpi_row(
             [
                 {"label": "분석 완료 종목", "value": f"{total_analyzed}개", "sub": "최소 표본 조건 충족 종목"},
-                {"label": "현재 매수 시그널 포착", "value": f"{total_active}개", "sub": f"최근 {recent_signal_days}거래일 내 신호 발생", "color": theme["accent"]},
+                {"label": "현재 매수 시그널 포착", "value": f"{total_active}개", "sub": f"전체 확률 기준 (최근 {recent_signal_days}거래일)", "color": theme["accent"]},
                 {"label": "익절 도달 70% 이상", "value": f"{high_prob_active}개", "sub": "과거 적중률 70% 이상 종목", "color": theme["tp_color"]},
                 {"label": "현재 최고 적중률", "value": top_active_prob, "sub": top_active_ticker, "color": theme["tp_color"]},
             ]
@@ -1602,7 +1602,40 @@ def main() -> None:
                 filtered_active = filtered_active[filtered_active["당일 시그널"] == True]
 
             if filtered_active.empty:
-                st.warning("선택한 필터 조건에 맞는 종목이 없습니다. 최소 익절 도달 확률 슬라이더를 낮춰보세요.")
+                max_avail_prob = float(active_signals_df["목표 도달 확률(%)"].max())
+                st.warning(
+                    f"현재 포착된 시그널 {len(active_signals_df)}개 중 설정하신 '{min_prob_filter}% 이상' 조건을 "
+                    f"충족하는 종목이 없습니다. (현재 최고 도달 확률: {max_avail_prob:.1f}%) "
+                    "위 슬라이더를 낮추거나 아래에서 전체 포착 종목을 확인해 보세요."
+                )
+                with st.expander(f"참고: 필터 미만 포착 시그널 {len(active_signals_df)}개 보기", expanded=True):
+                    st.dataframe(
+                        active_signals_df[
+                            [
+                                "Ticker",
+                                "기업명",
+                                "매매기법 조합",
+                                "목표 도달 확률(%)",
+                                "순수 승률(%)",
+                                "권장 진입가",
+                                "익절가($)",
+                                "손절가($)",
+                                "마지막 발생일",
+                            ]
+                        ],
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "목표 도달 확률(%)": st.column_config.ProgressColumn(
+                                "익절 도달 확률", format="%.1f%%", min_value=0, max_value=100
+                            ),
+                            "순수 승률(%)": st.column_config.ProgressColumn(
+                                "순수 승률", format="%.1f%%", min_value=0, max_value=100
+                            ),
+                            "익절가($)": st.column_config.NumberColumn("익절선", format="$%.2f"),
+                            "손절가($)": st.column_config.NumberColumn("손절선", format="$%.2f"),
+                        },
+                    )
             else:
                 st.markdown("#### 오늘의 TOP 3 추천 종목")
                 top_cards = filtered_active.head(3)
