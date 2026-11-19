@@ -14,7 +14,13 @@ from src.data_loader import BASE_DIR
 
 ENV_FILE = BASE_DIR / ".env"
 SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
-GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+]
 
 
 def load_gemini_api_key() -> str:
