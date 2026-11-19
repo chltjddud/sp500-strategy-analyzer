@@ -978,18 +978,15 @@ def render_feedback_results(sb_client, theme: Dict[str, str]) -> None:
                 else:
                     logs_view["필터 버전"] = "국면 ON"
 
-                if "universe_scope" in logs_view.columns:
-                    logs_view["종목 범위"] = logs_view["universe_scope"].map(
-                        lambda u: "상위 50개" if str(u).upper().startswith("TOP") else "전체 종목"
-                    )
-                elif "is_top50" in logs_view.columns:
-                    logs_view["종목 범위"] = logs_view["is_top50"].map(
-                        lambda b: "상위 50개" if bool(b) else "전체 종목"
-                    )
-                else:
-                    logs_view["종목 범위"] = logs_view["ticker"].map(
-                        lambda t: "상위 50개" if t in TOP_50_TICKERS else "전체 종목"
-                    )
+                def _resolve_scope_label(r: pd.Series) -> str:
+                    if str(r.get("ticker", "")) not in TOP_50_TICKERS:
+                        return "전체 종목"
+                    u_val = str(r.get("universe_scope", "")).upper()
+                    if u_val == "ALL":
+                        return "전체 종목"
+                    return "상위 50개"
+
+                logs_view["종목 범위"] = logs_view.apply(_resolve_scope_label, axis=1)
 
                 if "exit_date" not in logs_view.columns:
                     logs_view["exit_date"] = "-"

@@ -448,15 +448,13 @@ def compute_4way_feedback_comparison(logs_df: pd.DataFrame) -> pd.DataFrame:
 
     rows: List[Dict[str, Any]] = []
     for track_id, scope_label, regime_flag, regime_label in track_defs:
+        in_top50_mask = graded["ticker"].isin(TOP_50_TICKERS)
         if scope_label.startswith("상위"):
-            mask = (graded["universe_scope"] == "TOP50") & (graded["regime_filter_on"] == regime_flag)
+            mask = in_top50_mask & (graded["universe_scope"] == "TOP50") & (graded["regime_filter_on"] == regime_flag)
             if not mask.any():
-                mask = (graded["is_top50"] == True) & (graded["regime_filter_on"] == regime_flag)
+                mask = in_top50_mask & (graded["is_top50"] == True) & (graded["regime_filter_on"] == regime_flag)
         else:
-            mask = (graded["universe_scope"] == "ALL") & (graded["regime_filter_on"] == regime_flag)
-            if not mask.any() and (graded["universe_scope"] == "TOP50").all():
-                # If everything in DB was saved under a single universe scope
-                mask = graded["regime_filter_on"] == regime_flag
+            mask = ((graded["universe_scope"] == "ALL") | (~in_top50_mask)) & (graded["regime_filter_on"] == regime_flag)
 
         grp = graded[mask]
         total = int(len(grp))
