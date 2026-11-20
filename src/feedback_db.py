@@ -150,6 +150,26 @@ def save_signals_to_db(
         return 0
 
     clean_scope = "TOP50" if str(universe_scope).upper().startswith("TOP") else "ALL"
+
+    # Exclude tickers currently being tracked (PENDING) in this exact track
+    pending_tickers: set[str] = set()
+    try:
+        p_res = (
+            sb.table("signal_logs")
+            .select("ticker")
+            .eq("status", "PENDING")
+            .eq("regime_filter_on", bool(regime_filter_on))
+            .eq("universe_scope", clean_scope)
+            .execute()
+        )
+        pending_tickers = {str(r["ticker"]) for r in (p_res.data or []) if r.get("ticker")}
+    except Exception:
+        try:
+            p_res = sb.table("signal_logs").select("ticker").eq("status", "PENDING").execute()
+            pending_tickers = {str(r["ticker"]) for r in (p_res.data or []) if r.get("ticker")}
+        except Exception:
+            pending_tickers = set()
+
     rows_to_save: List[Dict[str, Any]] = []
     for _, row in qualified.iterrows():
         sig_date = str(row.get("마지막 발생일", "")).strip()
@@ -157,6 +177,12 @@ def save_signals_to_db(
             continue
         ticker_str = str(row["Ticker"])
         is_top50_val = ticker_str in TOP_50_TICKERS
+        # Never allow a non-TOP50 ticker to be saved under the TOP50 track
+        if clean_scope == "TOP50" and not is_top50_val:
+            continue
+        # Exclude tickers already being tracked (PENDING) in this track
+        if ticker_str in pending_tickers:
+            continue
         rows_to_save.append(
             {
                 "ticker": ticker_str,
