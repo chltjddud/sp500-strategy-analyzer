@@ -3,6 +3,7 @@ S&P 500 Ticker & Historical OHLCV Data Loader with Local Caching.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -13,6 +14,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import requests
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -108,8 +111,8 @@ def get_sp500_constituents(force_refresh: bool = False) -> pd.DataFrame:
             df = pd.read_csv(CONSTITUENTS_FILE)
             if {"Symbol", "Security", "Sector"}.issubset(df.columns) and len(df) > 40:
                 return df
-        except Exception:
-            pass
+        except (OSError, pd.errors.ParserError, ValueError) as exc:
+            logger.warning("Failed to read cached constituents CSV: %s", exc)
 
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {
@@ -127,7 +130,8 @@ def get_sp500_constituents(force_refresh: bool = False) -> pd.DataFrame:
         df["Symbol"] = df["Symbol"].astype(str).map(normalize_ticker)
         df.to_csv(CONSTITUENTS_FILE, index=False)
         return df
-    except Exception:
+    except (requests.RequestException, ValueError, KeyError, OSError) as exc:
+        logger.warning("Failed to fetch S&P 500 constituents from Wikipedia, using fallback: %s", exc)
         df = pd.DataFrame(FALLBACK_SP500)
         df.to_csv(CONSTITUENTS_FILE, index=False)
         return df
@@ -172,7 +176,8 @@ def _read_existing_cache(cpath: Path) -> pd.DataFrame:
         return pd.DataFrame()
     try:
         return _clean_ohlcv(pd.read_csv(cpath, index_col=0, parse_dates=True))
-    except Exception:
+    except (OSError, pd.errors.ParserError, ValueError) as exc:
+        logger.warning("Failed to read OHLCV cache %s: %s", cpath.name, exc)
         return pd.DataFrame()
 
 
@@ -236,7 +241,8 @@ def fetch_single_stock(
         if not cleaned.empty:
             cleaned.to_csv(cpath)
         return cleaned
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to fetch stock %s: %s", norm_ticker, exc)
         if not existing_df.empty:
             return existing_df
         return pd.DataFrame()
@@ -314,7 +320,8 @@ def fetch_multiple_stocks(
                         merged = _merge_and_save_cache(_cache_path(t, period), inc_items[t], new_sub)
                         if len(merged) >= 60:
                             results[t] = merged
-            except Exception:
+            except Exception as exc:
+                logger.warning("Incremental batch download failed (%s): %s", batch[:3], exc)
                 for t in batch:
                     results[t] = inc_items[t]
 
@@ -351,7 +358,8 @@ def fetch_multiple_stocks(
                         if len(cleaned) >= 60:
                             cleaned.to_csv(_cache_path(t, period))
                             results[t] = cleaned
-        except Exception:
+        except Exception as exc:
+            logger.warning("Full batch download failed (%s), falling back to single fetch: %s", batch[:3], exc)
             for t in batch:
                 df = fetch_single_stock(t, period=period, use_cache=use_cache)
                 if len(df) >= 60:
@@ -440,7 +448,8 @@ def fetch_upcoming_earnings_days(
     if cache_file.exists():
         try:
             cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to read earnings cache: %s", exc)
             cache_data = {}
 
     now_dt = datetime.now()
@@ -463,8 +472,8 @@ def fetch_upcoming_earnings_days(
                     else:
                         results[t] = None
                     continue
-            except Exception:
-                pass
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.debug("Invalid cached earnings entry for %s: %s", t, exc)
 
         # Fetch from yfinance
         next_ed_str: Optional[str] = None
@@ -483,8 +492,8 @@ def fetch_upcoming_earnings_days(
                 if diff >= 0:
                     days_until = int(diff)
                     next_ed_str = ed_dt.strftime("%Y-%m-%d")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to fetch earnings calendar for %s: %s", t, exc)
 
         results[t] = days_until
         cache_data[t] = {
@@ -496,8 +505,8 @@ def fetch_upcoming_earnings_days(
     if updated:
         try:
             cache_file.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to write earnings cache: %s", exc)
 
     return results
 

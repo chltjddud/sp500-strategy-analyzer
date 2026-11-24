@@ -2,7 +2,8 @@ name: Daily S&P 500 Auto Feedback & Grading
 
 on:
   schedule:
-    # 미국 장 마감 후 매일 화~토 오전 07:00 KST (= UTC 22:00 Mon-Fri)
+    # UTC 22:00 Mon-Fri = KST 화~토 07:00
+    # EST(겨울) 기준 17:00 ET(장 마감 1시간 후), EDT(여름) 기준 18:00 ET(장 마감 2시간 후)
     - cron: "0 22 * * 1-5"
   workflow_dispatch:
 
@@ -25,11 +26,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run daily S&P 500 grading & signal recording
+      # 참고: daily_feedback_job.py는 Gemini API를 호출하지 않으므로 GEMINI_API_KEY가 불필요합니다.
+      - name: Run daily S&P 500 grading & signal recording (with retry)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           SCAN_SCOPE: "all"
         run: |
-          python scripts/daily_feedback_job.py
+          for attempt in 1 2; do
+            echo "=== Attempt $attempt ==="
+            if python scripts/daily_feedback_job.py; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 2 ]; then
+              echo "Job failed; retrying in 30s..."
+              sleep 30
+            fi
+          done
+          echo "Daily feedback job failed after 2 attempts." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
+      - name: Notify Slack on failure (optional)
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"[S&P 500 Daily Feedback] GitHub Actions 작업이 실패했습니다: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$SLACK_WEBHOOK_URL"
+          else
+            echo "SLACK_WEBHOOK_URL secret not configured; skipping Slack notification."
+          fi

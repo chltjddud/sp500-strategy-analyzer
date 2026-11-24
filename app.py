@@ -6,7 +6,11 @@ Run with: streamlit run app.py
 from __future__ import annotations
 
 import importlib
-from typing import Dict, List, Tuple
+import json
+import logging
+from typing import Any, Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -464,6 +468,21 @@ def cached_stock_data(tickers: Tuple[str, ...], period: str, refresh_nonce: int 
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def cached_ai_briefing(
+    ticker: str,
+    combo_id: str,
+    signal_date: str,
+    row_json: str,
+    market_json: str,
+) -> str:
+    return generate_ai_briefing(
+        ticker=ticker,
+        row_data=json.loads(row_json),
+        market_summary=json.loads(market_json),
+    )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def cached_feedback_bonus(sb_url: str, sb_key: str) -> Dict[str, float]:
     if not sb_url or not sb_key:
         return {}
@@ -475,8 +494,8 @@ def cached_feedback_bonus(sb_url: str, sb_key: str) -> Dict[str, float]:
                 str(r["combo_id"]): float(r["feedback_bonus"])
                 for _, r in _fb_tmp_df.iterrows()
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to load feedback bonus cache: %s", exc)
     return {}
 
 
@@ -2180,10 +2199,13 @@ def main() -> None:
                 if load_gemini_api_key():
                     if st.button(f"{target_ticker} · Gemini AI 종합 매매 브리핑 생성", key=f"ai_btn_{target_ticker}"):
                         with st.spinner("Gemini AI가 차트·뉴스·시장 국면을 종합 분석하는 중..."):
-                            briefing_txt = generate_ai_briefing(
+                            row_dict = sel_row.to_dict()
+                            briefing_txt = cached_ai_briefing(
                                 ticker=target_ticker,
-                                row_data=sel_row.to_dict(),
-                                market_summary=market_summary,
+                                combo_id=str(selected_combo_id),
+                                signal_date=str(row_dict.get("마지막 발생일", "")),
+                                row_json=json.dumps(row_dict, default=str, sort_keys=True),
+                                market_json=json.dumps(market_summary, default=str, sort_keys=True),
                             )
                             st.info(briefing_txt)
 

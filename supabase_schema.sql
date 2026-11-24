@@ -1,5 +1,6 @@
--- S&P 500 매매기법 조합 분석기 & 자가 피드백 DB 스키마
+-- S&P 500 매매기법 조합 분석기 & 자가 피드백 DB 초기 스키마
 -- Supabase 대시보드 -> SQL Editor -> New Query 에 전체 내용을 붙여넣고 Run 을 클릭하세요.
+-- 기존 테이블을 4대 트랙 스키마로 업그레이드할 때는 migrations/001_add_4way_tracks.sql 을 실행하세요.
 
 -- 1. Colab 대용량 초반 분석 결과 저장 테이블
 CREATE TABLE IF NOT EXISTS strategy_baseline (
@@ -41,19 +42,15 @@ CREATE TABLE IF NOT EXISTS signal_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 기존 테이블이 이미 있는 경우 새 컬럼 안전 추가 및 4개 트랙 복합 유니크 인덱스 생성
-ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS regime_filter_on BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS rs_filter_on BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS universe_scope TEXT NOT NULL DEFAULT 'ALL';
-ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS is_top50 BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS exit_date DATE;
-ALTER TABLE signal_logs ADD COLUMN IF NOT EXISTS days_held INTEGER;
-
-ALTER TABLE signal_logs DROP CONSTRAINT IF EXISTS signal_logs_ticker_combo_id_signal_date_key;
-DROP INDEX IF EXISTS idx_signal_logs_unique_regime;
-DROP INDEX IF EXISTS idx_signal_logs_unique_4way;
+-- 4대 트랙 중복 방지 유니크 인덱스 & 자주 조회되는 컬럼 인덱스
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_logs_unique_4way
     ON signal_logs (ticker, combo_id, signal_date, regime_filter_on, universe_scope);
+CREATE INDEX IF NOT EXISTS idx_signal_logs_status
+    ON signal_logs (status);
+CREATE INDEX IF NOT EXISTS idx_signal_logs_signal_date
+    ON signal_logs (signal_date DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_logs_ticker
+    ON signal_logs (ticker);
 
 -- 3. 기법 조합별 실전 채점 기반 자가 피드백 가중치 테이블
 CREATE TABLE IF NOT EXISTS strategy_feedback (
@@ -68,7 +65,14 @@ CREATE TABLE IF NOT EXISTS strategy_feedback (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 개인 프로젝트용 RLS 비활성화 (anon/publishable key 로 읽기/쓰기 가능)
+-- ============================================================================
+-- RLS (Row Level Security) 설정
+-- 개인 프로젝트에서는 anon key로 읽기/쓰기할 수 있도록 비활성화되어 있습니다.
+-- 멀티 유저/공개 배포 시에는 아래처럼 RLS를 활성화하고 정책을 적용하세요:
+--   ALTER TABLE signal_logs ENABLE ROW LEVEL SECURITY;
+--   CREATE POLICY "public_read" ON signal_logs FOR SELECT USING (true);
+--   CREATE POLICY "service_write" ON signal_logs FOR ALL USING (auth.role() = 'service_role');
+-- ============================================================================
 ALTER TABLE strategy_baseline DISABLE ROW LEVEL SECURITY;
 ALTER TABLE signal_logs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE strategy_feedback DISABLE ROW LEVEL SECURITY;

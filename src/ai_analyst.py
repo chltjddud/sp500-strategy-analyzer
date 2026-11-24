@@ -4,7 +4,9 @@ Reads GEMINI_API_KEY securely from environment, .env, or Streamlit secrets.
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -12,43 +14,63 @@ import yfinance as yf
 
 from src.data_loader import BASE_DIR
 
+logger = logging.getLogger(__name__)
+
 ENV_FILE = BASE_DIR / ".env"
 SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
-GEMINI_MODELS = [
+DEFAULT_GEMINI_MODELS = [
     "gemini-3.8-flash",
-    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-flash-latest",
 ]
 
 
-def load_gemini_api_key() -> str:
-    """Load GEMINI_API_KEY from env, Streamlit st.secrets, .env, or secrets.toml."""
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if key:
-        return key
+def _read_config_value(key_name: str) -> str:
+    """Read a config value from env, Streamlit st.secrets, .env, or secrets.toml."""
+    val = os.environ.get(key_name, "").strip()
+    if val:
+        return val
 
     try:
         import streamlit as st
 
-        if "GEMINI_API_KEY" in st.secrets:
-            return str(st.secrets["GEMINI_API_KEY"]).strip()
-    except Exception:
-        pass
+        if key_name in st.secrets:
+            return str(st.secrets[key_name]).strip()
+    except Exception as exc:
+        logger.debug("st.secrets lookup failed for %s: %s", key_name, exc)
 
     for fpath in (ENV_FILE, SECRETS_FILE):
-        if fpath.exists():
-            try:
-                for line in fpath.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("GEMINI_API_KEY") and "=" in line:
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            return val
-            except Exception:
-                pass
+        if not fpath.exists():
+            continue
+        try:
+            for line in fpath.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == key_name:
+                    cleaned = v.strip().strip('"').strip("'")
+                    if cleaned:
+                        return cleaned
+        except OSError as exc:
+            logger.warning("Failed to read config file %s: %s", fpath, exc)
     return ""
+
+
+def load_gemini_api_key() -> str:
+    """Load GEMINI_API_KEY from env, Streamlit st.secrets, .env, or secrets.toml."""
+    return _read_config_value("GEMINI_API_KEY")
+
+
+def load_gemini_models() -> List[str]:
+    """Load comma-separated GEMINI_MODELS from config, falling back to defaults."""
+    raw = _read_config_value("GEMINI_MODELS")
+    if raw:
+        models = [m.strip() for m in raw.split(",") if m.strip()]
+        if models:
+            return models
+    return list(DEFAULT_GEMINI_MODELS)
 
 
 def fetch_recent_news_titles(ticker: str, max_items: int = 5) -> List[str]:
@@ -65,8 +87,8 @@ def fetch_recent_news_titles(ticker: str, max_items: int = 5) -> List[str]:
                     title = str(item["content"].get("title", ""))
             if title:
                 titles.append(title)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to fetch news headlines for %s: %s", ticker, exc)
     return titles
 
 
@@ -75,6 +97,7 @@ def generate_ai_briefing(
     row_data: Dict[str, Any],
     market_summary: Dict[str, Any],
     api_key: Optional[str] = None,
+    models: Optional[List[str]] = None,
 ) -> str:
     """
     Call Google Gemini API to generate a concise, practical Korean trading briefing
@@ -114,23 +137,52 @@ def generate_ai_briefing(
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.35, "maxOutputTokens": 650},
     }
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": key,
+    }
 
+    target_models = models if models else load_gemini_models()
     last_err = ""
-    for model_name in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
-        try:
-            resp = requests.post(url, json=payload, timeout=20)
-            if resp.status_code == 200:
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    text = "".join(p.get("text", "") for p in parts).strip()
-                    if text:
-                        return text
-            last_err = f"HTTP {resp.status_code}: {resp.text[:180]}"
-        except Exception as exc:
-            last_err = str(exc)
+
+    for model_name in target_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        for attempt in range(2):
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=20)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        text = "".join(p.get("text", "") for p in parts).strip()
+                        if text:
+                            return text
+                    last_err = f"{model_name}: 응답 본문이 비어 있습니다."
+                    break
+
+                if resp.status_code in (401, 403):
+                    logger.error("Gemini API authentication error (%s)", resp.status_code)
+                    return "Gemini API Key 인증에 실패했습니다. 키 유효성과 권한을 확인해 주세요."
+
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    last_err = f"{model_name} HTTP {resp.status_code}"
+                    logger.warning("Transient Gemini error on %s (attempt %d): HTTP %s", model_name, attempt + 1, resp.status_code)
+                    if attempt == 0:
+                        time.sleep(0.8)
+                        continue
+                    break
+
+                # Other 4xx errors (e.g. 404 model not found, 400 bad request): move to next model
+                last_err = f"{model_name} HTTP {resp.status_code}: {resp.text[:160]}"
+                logger.warning("Gemini request failed on %s: %s", model_name, last_err)
+                break
+            except requests.RequestException as exc:
+                last_err = f"{model_name} 요청 오류: {type(exc).__name__}"
+                logger.warning("Gemini network error on %s (attempt %d): %s", model_name, attempt + 1, exc)
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                break
 
     return f"Gemini AI 응답을 가져오지 못했습니다. ({last_err})"
-

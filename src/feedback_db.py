@@ -5,6 +5,7 @@ and computes self-feedback bonus/penalty weights per strategy combination.
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from src.data_loader import BASE_DIR, TOP_50_TICKERS, fetch_single_stock
+
+logger = logging.getLogger(__name__)
 
 SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
 ENV_FILE = BASE_DIR / ".env"
@@ -41,8 +44,8 @@ def load_saved_credentials() -> Tuple[str, str]:
                 url = str(st.secrets["SUPABASE_URL"])
             if not key and "SUPABASE_KEY" in st.secrets:
                 key = str(st.secrets["SUPABASE_KEY"])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("st.secrets unavailable for Supabase credentials: %s", exc)
 
     # Check .env first
     if ENV_FILE.exists() and (not url or not key):
@@ -59,8 +62,8 @@ def load_saved_credentials() -> Tuple[str, str]:
                         url = v
                     elif k == "SUPABASE_KEY" and not key:
                         key = v
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to read .env for Supabase credentials: %s", exc)
 
     # Check .streamlit/secrets.toml next
     if SECRETS_FILE.exists() and (not url or not key):
@@ -77,8 +80,8 @@ def load_saved_credentials() -> Tuple[str, str]:
                         url = v
                     elif k == "SUPABASE_KEY" and not key:
                         key = v
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to read secrets.toml for Supabase credentials: %s", exc)
 
     return normalize_supabase_url(url), key
 
@@ -163,11 +166,13 @@ def save_signals_to_db(
             .execute()
         )
         pending_tickers = {str(r["ticker"]) for r in (p_res.data or []) if r.get("ticker")}
-    except Exception:
+    except Exception as exc:
+        logger.debug("Track-specific pending query failed, retrying without track filter: %s", exc)
         try:
             p_res = sb.table("signal_logs").select("ticker").eq("status", "PENDING").execute()
             pending_tickers = {str(r["ticker"]) for r in (p_res.data or []) if r.get("ticker")}
-        except Exception:
+        except Exception as fallback_exc:
+            logger.warning("Fallback pending ticker query failed: %s", fallback_exc)
             pending_tickers = set()
 
     rows_to_save: List[Dict[str, Any]] = []
@@ -213,8 +218,8 @@ def save_signals_to_db(
             ignore_duplicates=True,
         ).execute()
         return len(rows_to_save)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("4-way upsert failed, trying legacy regime conflict key: %s", exc)
 
     # Fallback 1: without universe_scope in on_conflict
     try:
@@ -224,8 +229,8 @@ def save_signals_to_db(
             ignore_duplicates=True,
         ).execute()
         return len(rows_to_save)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Legacy regime upsert failed, falling back to base schema: %s", exc)
 
     # Fallback 2: minimal base schema fallback
     base_rows = [
@@ -358,7 +363,8 @@ def grade_pending_signals(sb) -> Dict[str, int]:
             }
             try:
                 sb.table("signal_logs").update(update_payload).eq("id", item["id"]).execute()
-            except Exception:
+            except Exception as exc:
+                logger.debug("Full signal_logs update failed for id=%s, retrying without exit_date/days_held: %s", item.get("id"), exc)
                 fallback_payload = {
                     k: v for k, v in update_payload.items() if k not in ("exit_date", "days_held")
                 }
@@ -474,23 +480,21 @@ def compute_4way_feedback_comparison(logs_df: pd.DataFrame) -> pd.DataFrame:
         graded["regime_filter_on"] = graded["regime_filter_on"].fillna(True).astype(bool)
 
     track_defs = [
-        ("Track 1", "상위 50대 종목", True, "필터 ON (안정장만)"),
-        ("Track 2", "상위 50대 종목", False, "필터 OFF (전체 장세)"),
-        ("Track 3", "S&P 500 전체", True, "필터 ON (안정장만)"),
-        ("Track 4", "S&P 500 전체", False, "필터 OFF (전체 장세)"),
+        ("Track 1", "TOP50", "상위 50대 종목", True, "필터 ON (안정장만)"),
+        ("Track 2", "TOP50", "상위 50대 종목", False, "필터 OFF (전체 장세)"),
+        ("Track 3", "ALL", "S&P 500 전체", True, "필터 ON (안정장만)"),
+        ("Track 4", "ALL", "S&P 500 전체", False, "필터 OFF (전체 장세)"),
     ]
 
+    in_top50_mask = graded["ticker"].isin(TOP_50_TICKERS)
     rows: List[Dict[str, Any]] = []
-    for track_id, scope_label, regime_flag, regime_label in track_defs:
-        in_top50_mask = graded["ticker"].isin(TOP_50_TICKERS)
-        if scope_label.startswith("상위"):
-            mask = in_top50_mask & (graded["universe_scope"] == "TOP50") & (graded["regime_filter_on"] == regime_flag)
-            if not mask.any():
-                mask = in_top50_mask & (graded["is_top50"] == True) & (graded["regime_filter_on"] == regime_flag)
-        else:
-            mask = ((graded["universe_scope"] == "ALL") | (~in_top50_mask)) & (graded["regime_filter_on"] == regime_flag)
-
-        grp = graded[mask]
+    for track_id, scope_code, scope_label, regime_flag, regime_label in track_defs:
+        scope_mask = (
+            (graded["universe_scope"] == "TOP50") & in_top50_mask
+            if scope_code == "TOP50"
+            else (graded["universe_scope"] == "ALL")
+        )
+        grp = graded[scope_mask & (graded["regime_filter_on"] == regime_flag)]
         total = int(len(grp))
         tp_wins = int((grp["status"] == "WIN").sum())
         all_wins = int(grp["status"].isin(["WIN", "EXPIRED_WIN"]).sum())
