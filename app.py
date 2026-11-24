@@ -498,6 +498,10 @@ def cached_scan_and_filter(
     use_rs_filter: bool,
     exclude_earnings: bool,
     feedback_items: Tuple[Tuple[str, float], ...],
+    use_sma200_filter: bool = False,
+    use_breakeven_stop: bool = True,
+    require_multi_in_high_vix: bool = True,
+    use_sector_bonus: bool = True,
     refresh_nonce: int = 0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
     constituents_df = cached_constituents()
@@ -523,6 +527,10 @@ def cached_scan_and_filter(
         use_rs_filter=use_rs_filter,
         min_rs_pct=0.0,
         feedback_bonus_map=feedback_bonus_map,
+        use_sma200_filter=use_sma200_filter,
+        use_breakeven_stop=use_breakeven_stop,
+        require_multi_in_high_vix=require_multi_in_high_vix,
+        use_sector_bonus=use_sector_bonus,
     )
 
     excluded_earnings_tickers: List[str] = []
@@ -1476,6 +1484,26 @@ def main() -> None:
                 value=True,
                 help="실전 채점 결과 승률이 높은 기법 조합에 가산점을 부여합니다.",
             )
+            use_breakeven_stop = st.checkbox(
+                "본절 보호 스탑 적용 (목표치 50% 도달 시 본절 방어)",
+                value=True,
+                help="진입 후 익절 목표의 절반 이상 수익이 나면 손절선을 진입가(+0.1%)로 끌어올려 수익 반납을 막습니다.",
+            )
+            require_multi_in_high_vix = st.checkbox(
+                "고변동성(VIX 25↑) 시 2개 이상 복합 시그널만 추천",
+                value=True,
+                help="변동성 경계장에서는 단일 지표 속임수를 막기 위해 2~3중 확인 시그널만 추천합니다.",
+            )
+            use_sector_bonus = st.checkbox(
+                "주도 섹터(Leading Sector) 강도 가산점 반영",
+                value=True,
+                help="최근 60일 수익률이 강한 상위 GICS 섹터 종목에 우선순위 가산점을 부여합니다.",
+            )
+            use_sma200_filter = st.checkbox(
+                "개별 종목 200일선(SMA200) 장기 상승추세만 선별",
+                value=False,
+                help="장기 하락 추세 종목을 제외하고 200일선 위 상승 추세 종목에서만 매수 타점을 찾습니다.",
+            )
 
         with st.expander("4. 매매기법 조합 세부 필터 (선택 사항)", expanded=False):
             max_comb = st.select_slider(
@@ -1584,6 +1612,10 @@ def main() -> None:
             use_rs_filter=use_rs_filter,
             exclude_earnings=exclude_earnings,
             feedback_items=fb_items,
+            use_sma200_filter=use_sma200_filter,
+            use_breakeven_stop=use_breakeven_stop,
+            require_multi_in_high_vix=require_multi_in_high_vix,
+            use_sector_bonus=use_sector_bonus,
             refresh_nonce=refresh_nonce,
         )
 

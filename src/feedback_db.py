@@ -290,13 +290,18 @@ def grade_pending_signals(sb) -> Dict[str, int]:
             days_held: Optional[int] = None
             actual_ret: Optional[float] = None
 
+            be_trigger = entry_p + 0.5 * (tp_p - entry_p)
+            be_stop_price = round(entry_p * 1.001, 2)
+            be_armed = False
+
             for day_idx, (bar_dt, bar) in enumerate(window.iterrows(), start=1):
                 bar_high = float(bar["High"])
                 bar_low = float(bar["Low"])
                 bar_close = float(bar["Close"])
+                cur_sl = be_stop_price if be_armed else sl_p
 
                 hit_tp = bar_high >= tp_p
-                hit_sl = bar_low <= sl_p
+                hit_sl = bar_low <= cur_sl
 
                 if hit_tp and not hit_sl:
                     new_status = "WIN"
@@ -305,8 +310,8 @@ def grade_pending_signals(sb) -> Dict[str, int]:
                     days_held = day_idx
                     break
                 elif hit_sl and not hit_tp:
-                    new_status = "LOSS"
-                    exit_p = sl_p
+                    new_status = "EXPIRED_WIN" if be_armed else "LOSS"
+                    exit_p = cur_sl
                     exit_dt_str = pd.to_datetime(bar_dt).strftime("%Y-%m-%d")
                     days_held = day_idx
                     break
@@ -315,11 +320,14 @@ def grade_pending_signals(sb) -> Dict[str, int]:
                         new_status = "WIN"
                         exit_p = tp_p
                     else:
-                        new_status = "LOSS"
-                        exit_p = sl_p
+                        new_status = "EXPIRED_WIN" if be_armed else "LOSS"
+                        exit_p = cur_sl
                     exit_dt_str = pd.to_datetime(bar_dt).strftime("%Y-%m-%d")
                     days_held = day_idx
                     break
+
+                if bar_high >= be_trigger:
+                    be_armed = True
 
             if new_status is None:
                 if len(fwd) >= hold_days:

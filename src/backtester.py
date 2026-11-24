@@ -38,11 +38,71 @@ def _deduplicate_indices(indices: np.ndarray, cooldown: int = 3) -> np.ndarray:
     return np.array(selected, dtype=int)
 
 
+def _simulate_window_outcome(
+    entry: float,
+    w_high: np.ndarray,
+    w_low: np.ndarray,
+    w_close: np.ndarray,
+    t_pct: float,
+    s_pct: float,
+    use_breakeven_stop: bool = False,
+) -> Tuple[bool, bool, bool, float, float, float, float]:
+    """
+    Simulate causal bar-by-bar forward outcome for a single trade window.
+    When `use_breakeven_stop` is True, once price reaches +50% of the TP target,
+    the Stop-Loss ratchets up to breakeven (+0.1%) for subsequent bars.
+    Returns: (target_hit, stop_hit_first, pure_win, realized_ret, max_ret, min_ret, end_ret)
+    """
+    max_h = float(np.max(w_high))
+    min_l = float(np.min(w_low))
+    final_c = float(w_close[-1])
+
+    max_r = (max_h / entry - 1.0) * 100.0
+    min_r = (min_l / entry - 1.0) * 100.0
+    end_r = (final_c / entry - 1.0) * 100.0
+
+    t_price = entry * (1.0 + t_pct / 100.0)
+    s_price = entry * (1.0 + s_pct / 100.0)
+    be_trigger = entry * (1.0 + 0.5 * t_pct / 100.0)
+    be_stop_price = entry * 1.001
+
+    t_hit = bool(np.any(w_high >= t_price))
+    be_armed = False
+
+    for b in range(len(w_close)):
+        bh = float(w_high[b])
+        bl = float(w_low[b])
+        bc = float(w_close[b])
+        cur_sl = be_stop_price if be_armed else s_price
+
+        hit_t = bh >= t_price
+        hit_s = bl <= cur_sl
+
+        if hit_t and not hit_s:
+            return True, False, True, t_pct, max_r, min_r, end_r
+        if hit_s and not hit_t:
+            if be_armed:
+                return t_hit, False, True, 0.1, max_r, min_r, end_r
+            return t_hit, True, False, s_pct, max_r, min_r, end_r
+        if hit_t and hit_s:
+            if bc >= entry:
+                return True, False, True, t_pct, max_r, min_r, end_r
+            if be_armed:
+                return t_hit, False, True, 0.1, max_r, min_r, end_r
+            return t_hit, True, False, s_pct, max_r, min_r, end_r
+
+        if use_breakeven_stop and bh >= be_trigger:
+            be_armed = True
+
+    return t_hit, False, (end_r > 0.0), end_r, max_r, min_r, end_r
+
+
 def precompute_forward_outcomes(
     df: pd.DataFrame,
     hold_days: int = 10,
     target_pct: Union[float, np.ndarray] = 4.0,
     stop_pct: Union[float, np.ndarray] = -4.0,
+    use_breakeven_stop: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
     Compute forward trade outcomes for every bar t in `df` over the next `hold_days` bars.
@@ -89,47 +149,22 @@ def precompute_forward_outcomes(
             continue
 
         valid_eval[t] = True
-        t_pct = float(tp_arr[t])
-        s_pct = float(sl_arr[t])  # negative, e.g. -3.5
-
-        max_h = float(np.max(w_high))
-        min_l = float(np.min(w_low))
-        final_c = float(w_close[-1])
-
-        max_ret[t] = (max_h / entry - 1.0) * 100.0
-        min_ret[t] = (min_l / entry - 1.0) * 100.0
-        end_ret[t] = (final_c / entry - 1.0) * 100.0
-
-        t_price = entry * (1.0 + t_pct / 100.0)
-        s_price = entry * (1.0 + s_pct / 100.0)
-
-        hit_t_bars = np.where(w_high >= t_price)[0]
-        hit_s_bars = np.where(w_low <= s_price)[0]
-
-        first_t = int(hit_t_bars[0]) if len(hit_t_bars) > 0 else 999999
-        first_s = int(hit_s_bars[0]) if len(hit_s_bars) > 0 else 999999
-
-        if first_t < 999999:
-            target_hit[t] = True
-
-        if first_t < first_s:
-            pure_win[t] = True
-            realized_ret[t] = t_pct
-        elif first_s < first_t:
-            pure_win[t] = False
-            stop_hit_first[t] = True
-            realized_ret[t] = s_pct
-        elif first_t < 999999 and first_t == first_s:
-            if w_close[first_t] >= entry:
-                pure_win[t] = True
-                realized_ret[t] = t_pct
-            else:
-                pure_win[t] = False
-                stop_hit_first[t] = True
-                realized_ret[t] = s_pct
-        else:
-            pure_win[t] = end_ret[t] > 0.0
-            realized_ret[t] = end_ret[t]
+        t_hit, s_first, p_win, r_ret, max_r, min_r, end_r = _simulate_window_outcome(
+            entry=entry,
+            w_high=w_high,
+            w_low=w_low,
+            w_close=w_close,
+            t_pct=float(tp_arr[t]),
+            s_pct=float(sl_arr[t]),
+            use_breakeven_stop=use_breakeven_stop,
+        )
+        target_hit[t] = t_hit
+        stop_hit_first[t] = s_first
+        pure_win[t] = p_win
+        realized_ret[t] = r_ret
+        max_ret[t] = max_r
+        min_ret[t] = min_r
+        end_ret[t] = end_r
 
     return {
         "target_hit": target_hit,
@@ -153,6 +188,7 @@ def _evaluate_combo_on_bars(
     tp_arr: np.ndarray,
     sl_arr: np.ndarray,
     hold_days: int,
+    use_breakeven_stop: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
     Fast evaluation of forward outcomes specifically on the bars where a strategy signaled.
@@ -187,47 +223,22 @@ def _evaluate_combo_on_bars(
             valid_eval[i] = False
             continue
 
-        t_pct = float(tp_arr[t])
-        s_pct = float(sl_arr[t])
-
-        max_h = float(np.max(w_high))
-        min_l = float(np.min(w_low))
-        final_c = float(w_close[-1])
-
-        max_ret[i] = (max_h / entry - 1.0) * 100.0
-        min_ret[i] = (min_l / entry - 1.0) * 100.0
-        end_ret[i] = (final_c / entry - 1.0) * 100.0
-
-        t_price = entry * (1.0 + t_pct / 100.0)
-        s_price = entry * (1.0 + s_pct / 100.0)
-
-        hit_t_bars = np.where(w_high >= t_price)[0]
-        hit_s_bars = np.where(w_low <= s_price)[0]
-
-        first_t = int(hit_t_bars[0]) if len(hit_t_bars) > 0 else 999999
-        first_s = int(hit_s_bars[0]) if len(hit_s_bars) > 0 else 999999
-
-        if first_t < 999999:
-            target_hit[i] = True
-
-        if first_t < first_s:
-            pure_win[i] = True
-            realized_ret[i] = t_pct
-        elif first_s < first_t:
-            pure_win[i] = False
-            stop_hit_first[i] = True
-            realized_ret[i] = s_pct
-        elif first_t < 999999 and first_t == first_s:
-            if w_close[first_t] >= entry:
-                pure_win[i] = True
-                realized_ret[i] = t_pct
-            else:
-                pure_win[i] = False
-                stop_hit_first[i] = True
-                realized_ret[i] = s_pct
-        else:
-            pure_win[i] = end_ret[i] > 0.0
-            realized_ret[i] = end_ret[i]
+        t_hit, s_first, p_win, r_ret, max_r, min_r, end_r = _simulate_window_outcome(
+            entry=entry,
+            w_high=w_high,
+            w_low=w_low,
+            w_close=w_close,
+            t_pct=float(tp_arr[t]),
+            s_pct=float(sl_arr[t]),
+            use_breakeven_stop=use_breakeven_stop,
+        )
+        target_hit[i] = t_hit
+        stop_hit_first[i] = s_first
+        pure_win[i] = p_win
+        realized_ret[i] = r_ret
+        max_ret[i] = max_r
+        min_ret[i] = min_r
+        end_ret[i] = end_r
 
     return {
         "valid_eval": valid_eval,
@@ -248,15 +259,20 @@ def _build_env_mask(
     vix_max: float,
     use_rs_filter: bool,
     min_rs_pct: float,
+    use_sma200_filter: bool = False,
 ) -> Tuple[np.ndarray, float]:
     """
-    Build a causal boolean mask combining Market Regime (SPY > SMA200 & VIX <= vix_max)
-    and Relative Strength (60d stock return - 60d SPY return >= min_rs_pct).
+    Build a causal boolean mask combining Market Regime (SPY > SMA200 & VIX <= vix_max),
+    individual stock long-term trend (Close >= SMA200), and Relative Strength.
     Returns (mask_array, latest_rs_vs_spy).
     """
     n = len(df_ind)
     env_mask = np.ones(n, dtype=bool)
     latest_rs = 0.0
+
+    if use_sma200_filter and "SMA200" in df_ind.columns:
+        sma200_ok = (df_ind["Close"] >= df_ind["SMA200"].fillna(df_ind["Close"])).to_numpy(dtype=bool)
+        env_mask &= sma200_ok
 
     stock_ret60 = (df_ind["Close"].pct_change(60) * 100.0).fillna(0.0)
 
@@ -298,10 +314,14 @@ def analyze_single_stock(
     use_rs_filter: bool = False,
     min_rs_pct: float = 0.0,
     feedback_bonus_map: Optional[Dict[str, float]] = None,
+    use_sma200_filter: bool = False,
+    use_breakeven_stop: bool = True,
+    require_multi_in_high_vix: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, np.ndarray], Dict[str, Any]]:
     """
     Run full indicator, combination signal, and strategy-tailored TP/SL backtest on a single stock.
-    Optionally applies causal Market Regime (SPY/VIX), Relative Strength (RS), and Supabase feedback weights.
+    Optionally applies causal Market Regime (SPY/VIX), individual SMA200 trend, Relative Strength (RS),
+    breakeven trailing stop, high-VIX multi-strategy confirmation, and feedback weights.
     """
     if df is None or len(df) < 60:
         return pd.DataFrame(), pd.DataFrame(), {}, {}
@@ -318,8 +338,14 @@ def analyze_single_stock(
         vix_max=vix_max,
         use_rs_filter=use_rs_filter,
         min_rs_pct=min_rs_pct,
+        use_sma200_filter=use_sma200_filter,
     )
     combo_signals = {cid: (arr & env_mask) for cid, arr in raw_combo_signals.items()}
+
+    latest_vix = 18.0
+    if market_ctx_df is not None and not market_ctx_df.empty and "VIX_CLOSE" in market_ctx_df.columns:
+        latest_vix = float(market_ctx_df["VIX_CLOSE"].dropna().iloc[-1]) if market_ctx_df["VIX_CLOSE"].notna().any() else 18.0
+    high_vix_mode = bool(require_multi_in_high_vix and latest_vix >= 25.0)
 
     base_tp_pct, base_sl_pct = compute_strategy_tp_sl_pct(
         df_ind, rr_multiplier=rr_multiplier
@@ -339,6 +365,7 @@ def analyze_single_stock(
         "fixed_stop_pct": stop_pct,
         "base_tp_pct": base_tp_pct,
         "base_sl_pct": base_sl_pct,
+        "use_breakeven_stop": use_breakeven_stop,
     }
 
     records: List[Dict[str, Any]] = []
@@ -369,6 +396,7 @@ def analyze_single_stock(
             tp_arr=tp_arr,
             sl_arr=sl_arr,
             hold_days=hold_days,
+            use_breakeven_stop=use_breakeven_stop,
         )
         valid_mask = eval_res["valid_eval"]
         trade_count = int(np.sum(valid_mask))
@@ -401,10 +429,16 @@ def analyze_single_stock(
             else (9.99 if gross_profit > 0 else 0.0)
         )
 
-        # Recent signal check
+        # Recent signal check (in high-VIX choppy markets, require >= 2 combined strategies for active buy signals)
         recent_slice = sig_arr[max(0, n - recent_signal_days) : n]
-        active_now = bool(np.any(recent_slice))
-        active_today = bool(sig_arr[-1]) if n > 0 else False
+        raw_active_now = bool(np.any(recent_slice))
+        raw_active_today = bool(sig_arr[-1]) if n > 0 else False
+        if high_vix_mode and num_strategies < 2:
+            active_now = False
+            active_today = False
+        else:
+            active_now = raw_active_now
+            active_today = raw_active_today
         last_sig_date = dates[all_sig_raw[-1]].strftime("%Y-%m-%d") if len(all_sig_raw) > 0 else "-"
 
         # Reference bar for explicit current TP / SL price lines:
@@ -599,6 +633,10 @@ def scan_market(
     use_rs_filter: bool = False,
     min_rs_pct: float = 0.0,
     feedback_bonus_map: Optional[Dict[str, float]] = None,
+    use_sma200_filter: bool = False,
+    use_breakeven_stop: bool = True,
+    require_multi_in_high_vix: bool = True,
+    use_sector_bonus: bool = True,
     progress_callback=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -648,6 +686,9 @@ def scan_market(
             use_rs_filter=use_rs_filter,
             min_rs_pct=min_rs_pct,
             feedback_bonus_map=feedback_bonus_map,
+            use_sma200_filter=use_sma200_filter,
+            use_breakeven_stop=use_breakeven_stop,
+            require_multi_in_high_vix=require_multi_in_high_vix,
         )
         if stats_df.empty:
             continue
@@ -674,6 +715,20 @@ def scan_market(
             active_signals.append(best_active)
 
     active_signals_df = pd.DataFrame(active_signals)
+    best_per_stock_df = pd.DataFrame(best_per_stock)
+
+    # Leading Sector Strength bonus: compute mean 60d RS per sector and boost leading sectors
+    if use_sector_bonus and not best_per_stock_df.empty and "섹터" in best_per_stock_df.columns:
+        sector_rs_map = (
+            best_per_stock_df.groupby("섹터")["상대강도(RS%)"].mean().to_dict()
+        )
+        for target_df in (active_signals_df, best_per_stock_df):
+            if not target_df.empty and "섹터" in target_df.columns:
+                sec_rs = target_df["섹터"].map(lambda s: float(sector_rs_map.get(s, 0.0)))
+                sec_bonus = np.clip(sec_rs * 0.25, -1.5, 3.0)
+                target_df["섹터 강도(%)"] = sec_rs.round(2)
+                target_df["종합 점수"] = (target_df["종합 점수"] + sec_bonus).round(1)
+
     if not active_signals_df.empty:
         active_signals_df.sort_values(
             by=["종합 점수", "목표 도달 확률(%)", "순수 승률(%)", "기대 수익률(%)"],
@@ -682,7 +737,6 @@ def scan_market(
         )
         active_signals_df.reset_index(drop=True, inplace=True)
 
-    best_per_stock_df = pd.DataFrame(best_per_stock)
     if not best_per_stock_df.empty:
         best_per_stock_df.sort_values(
             by=["종합 점수", "목표 도달 확률(%)", "순수 승률(%)", "기대 수익률(%)"],
