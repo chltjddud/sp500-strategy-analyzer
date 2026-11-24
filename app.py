@@ -6,7 +6,7 @@ Run with: streamlit run app.py
 from __future__ import annotations
 
 import importlib
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -447,6 +447,99 @@ def apply_theme_css(theme: Dict[str, str]) -> None:
 @st.cache_data(ttl=3600 * 12, show_spinner=False)
 def cached_constituents() -> pd.DataFrame:
     return get_sp500_constituents()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_market_context(period: str, refresh_nonce: int = 0) -> Tuple[pd.DataFrame, Dict]:
+    return fetch_market_context(period=period, use_cache=(refresh_nonce == 0))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_stock_data(tickers: Tuple[str, ...], period: str, refresh_nonce: int = 0) -> Dict[str, pd.DataFrame]:
+    return fetch_multiple_stocks(
+        tickers=list(tickers),
+        period=period,
+        use_cache=(refresh_nonce == 0),
+    )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_feedback_bonus(sb_url: str, sb_key: str) -> Dict[str, float]:
+    if not sb_url or not sb_key:
+        return {}
+    try:
+        _sb_tmp = get_supabase_client(sb_url, sb_key)
+        _fb_tmp_df = fetch_strategy_feedback(_sb_tmp)
+        if not _fb_tmp_df.empty:
+            return {
+                str(r["combo_id"]): float(r["feedback_bonus"])
+                for _, r in _fb_tmp_df.iterrows()
+            }
+    except Exception:
+        pass
+    return {}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_scan_and_filter(
+    tickers: Tuple[str, ...],
+    period: str,
+    hold_days: int,
+    target_pct: float,
+    stop_pct: float,
+    signal_window: int,
+    min_trades: int,
+    recent_signal_days: int,
+    max_comb: int,
+    use_dynamic_tpsl: bool,
+    rr_multiplier: float,
+    use_regime_filter: bool,
+    vix_max: float,
+    use_rs_filter: bool,
+    exclude_earnings: bool,
+    feedback_items: Tuple[Tuple[str, float], ...],
+    refresh_nonce: int = 0,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
+    constituents_df = cached_constituents()
+    market_ctx_df, _ = cached_market_context(period=period, refresh_nonce=refresh_nonce)
+    stock_data = cached_stock_data(tickers=tickers, period=period, refresh_nonce=refresh_nonce)
+    feedback_bonus_map = dict(feedback_items)
+
+    active_signals_df, best_per_stock_df, leaderboard_df = scan_market(
+        stock_data=stock_data,
+        constituents_df=constituents_df,
+        hold_days=hold_days,
+        target_pct=target_pct,
+        stop_pct=stop_pct,
+        signal_window=signal_window,
+        min_trades=min_trades,
+        recent_signal_days=recent_signal_days,
+        max_comb=max_comb,
+        use_dynamic_tpsl=use_dynamic_tpsl,
+        rr_multiplier=rr_multiplier,
+        market_ctx_df=market_ctx_df,
+        use_regime_filter=use_regime_filter,
+        vix_max=vix_max,
+        use_rs_filter=use_rs_filter,
+        min_rs_pct=0.0,
+        feedback_bonus_map=feedback_bonus_map,
+    )
+
+    excluded_earnings_tickers: List[str] = []
+    if not active_signals_df.empty:
+        cand_tickers = active_signals_df["Ticker"].unique().tolist()
+        earnings_map = fetch_upcoming_earnings_days(cand_tickers)
+        active_signals_df["실적발표(D-day)"] = active_signals_df["Ticker"].map(
+            lambda t: f"D-{earnings_map[t]}" if earnings_map.get(t) is not None else "-"
+        )
+        if exclude_earnings:
+            safe_mask = active_signals_df["Ticker"].map(
+                lambda t: earnings_map.get(t) is None or int(earnings_map[t]) > (hold_days + 3)
+            )
+            excluded_earnings_tickers = active_signals_df.loc[~safe_mask, "Ticker"].tolist()
+            active_signals_df = active_signals_df[safe_mask].reset_index(drop=True)
+
+    return active_signals_df, best_per_stock_df, leaderboard_df, excluded_earnings_tickers
 
 
 def _compute_non_overlapping_yshifts(
@@ -1399,21 +1492,16 @@ def main() -> None:
 
     sb_url, sb_key = load_saved_credentials()
 
-    # ---------------- MARKET CONTEXT & FEEDBACK WEIGHTS ----------------
-    market_ctx_df, market_summary = fetch_market_context(period=period, use_cache=not force_refresh)
+    if force_refresh:
+        st.session_state["refresh_nonce"] = int(st.session_state.get("refresh_nonce", 0)) + 1
+    refresh_nonce = int(st.session_state.get("refresh_nonce", 0))
 
-    feedback_bonus_map: Dict[str, float] = {}
-    if use_feedback_weights and sb_url and sb_key:
-        try:
-            _sb_tmp = get_supabase_client(sb_url, sb_key)
-            _fb_tmp_df = fetch_strategy_feedback(_sb_tmp)
-            if not _fb_tmp_df.empty:
-                feedback_bonus_map = {
-                    str(r["combo_id"]): float(r["feedback_bonus"])
-                    for _, r in _fb_tmp_df.iterrows()
-                }
-        except Exception:
-            feedback_bonus_map = {}
+    # ---------------- MARKET CONTEXT & FEEDBACK WEIGHTS ----------------
+    market_ctx_df, market_summary = cached_market_context(period=period, refresh_nonce=refresh_nonce)
+
+    feedback_bonus_map: Dict[str, float] = (
+        cached_feedback_bonus(sb_url, sb_key) if (use_feedback_weights and sb_url and sb_key) else {}
+    )
 
     # ---------------- HEADER & MARKET REGIME TOGGLE ----------------
     col_hdr1, col_hdr2 = st.columns([5, 1.3])
@@ -1471,55 +1559,33 @@ def main() -> None:
         st.warning("좌측 사이드바에서 최소 1개 이상의 분석 대상 종목/섹터를 선택해 주세요.")
         return
 
-    prog_bar = st.progress(0.0, text="데이터 및 매매기법별 맞춤 익절·손절 분석 준비 중...")
-
-    def update_progress(p: float, msg: str) -> None:
-        prog_bar.progress(min(1.0, max(0.0, float(p))), text=msg)
-
-    stock_data = fetch_multiple_stocks(
-        tickers=selected_tickers,
-        period=period,
-        use_cache=not force_refresh,
-        progress_callback=update_progress,
-    )
-
-    active_signals_df, best_per_stock_df, leaderboard_df = scan_market(
-        stock_data=stock_data,
-        constituents_df=constituents_df,
-        hold_days=hold_days,
-        target_pct=target_pct,
-        stop_pct=stop_pct,
-        signal_window=signal_window,
-        min_trades=min_trades,
-        recent_signal_days=recent_signal_days,
-        max_comb=max_comb,
-        use_dynamic_tpsl=use_dynamic_tpsl,
-        rr_multiplier=rr_multiplier,
-        market_ctx_df=market_ctx_df,
-        use_regime_filter=use_regime_filter,
-        vix_max=vix_max,
-        use_rs_filter=use_rs_filter,
-        min_rs_pct=0.0,
-        feedback_bonus_map=feedback_bonus_map,
-        progress_callback=update_progress,
-    )
-
-    # Apply Earnings Avoidance Filter on active signal candidates
-    excluded_earnings_tickers: List[str] = []
-    if not active_signals_df.empty:
-        cand_tickers = active_signals_df["Ticker"].unique().tolist()
-        earnings_map = fetch_upcoming_earnings_days(cand_tickers)
-        active_signals_df["실적발표(D-day)"] = active_signals_df["Ticker"].map(
-            lambda t: f"D-{earnings_map[t]}" if earnings_map.get(t) is not None else "-"
+    tickers_tuple = tuple(selected_tickers)
+    fb_items = tuple(sorted(feedback_bonus_map.items()))
+    with st.spinner(f"{len(tickers_tuple)}개 종목 데이터 및 매매기법 분석 중... (캐시 적용 시 즉시 로드)"):
+        stock_data = cached_stock_data(
+            tickers=tickers_tuple,
+            period=period,
+            refresh_nonce=refresh_nonce,
         )
-        if exclude_earnings:
-            safe_mask = active_signals_df["Ticker"].map(
-                lambda t: earnings_map.get(t) is None or int(earnings_map[t]) > (hold_days + 3)
-            )
-            excluded_earnings_tickers = active_signals_df.loc[~safe_mask, "Ticker"].tolist()
-            active_signals_df = active_signals_df[safe_mask].reset_index(drop=True)
-
-    prog_bar.empty()
+        active_signals_df, best_per_stock_df, leaderboard_df, excluded_earnings_tickers = cached_scan_and_filter(
+            tickers=tickers_tuple,
+            period=period,
+            hold_days=hold_days,
+            target_pct=target_pct,
+            stop_pct=stop_pct,
+            signal_window=signal_window,
+            min_trades=min_trades,
+            recent_signal_days=recent_signal_days,
+            max_comb=max_comb,
+            use_dynamic_tpsl=use_dynamic_tpsl,
+            rr_multiplier=rr_multiplier,
+            use_regime_filter=use_regime_filter,
+            vix_max=vix_max,
+            use_rs_filter=use_rs_filter,
+            exclude_earnings=exclude_earnings,
+            feedback_items=fb_items,
+            refresh_nonce=refresh_nonce,
+        )
 
     # ---------------- TABS ----------------
     tab_signals, tab_stock, tab_leaderboard, tab_feedback, tab_guide = st.tabs(
