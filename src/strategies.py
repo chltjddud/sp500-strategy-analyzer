@@ -72,6 +72,26 @@ STRATEGY_METADATA: Dict[str, Dict[str, str]] = {
         "tp_short": "기준봉 길이 2.2배 확장",
         "sl_short": "수급 양봉 저가 이탈",
     },
+    "STOCH_REBOUND": {
+        "name": "스토캐스틱 과매도 골든크로스",
+        "short": "스토캐스틱",
+        "category": "역추세/모멘텀",
+        "desc": "슬로우 스토캐스틱(14,3,3) %K가 과매도 구간(32 이하)에서 %D를 상향 돌파하며 양봉 반등할 때",
+        "tp_rule": "최근 20일 스윙 고점 저항선 또는 진입가 + 2.0×ATR 단기 반등 목표가",
+        "sl_rule": "과매도 반등 직전 5일 스윙 최저가(Low5) 이탈 시 손절 (-0.35×ATR 여유)",
+        "tp_short": "스윙고점·단기반등",
+        "sl_short": "5일 최저가 이탈",
+    },
+    "EMA_PULLBACK": {
+        "name": "단기 추세 EMA 8/21 눌림 반등",
+        "short": "EMA눌림",
+        "category": "추세 추종/눌림목",
+        "desc": "단기 정배열(EMA8 > EMA21) 상승 추세 중 8일~21일 지수이평선 부근까지 눌렸다가 양봉으로 EMA8을 재돌파할 때",
+        "tp_rule": "20일 전고점 돌파(+1%) 또는 진입가 + 2.2×ATR 추세 재개 목표가",
+        "sl_rule": "21일 지수이평선(EMA21) 또는 최근 5일 저점 하향 이탈 시 손절",
+        "tp_short": "전고점 돌파·추세재개",
+        "sl_short": "EMA21·5일저점 이탈",
+    },
 }
 
 BASE_STRATEGY_KEYS: List[str] = list(STRATEGY_METADATA.keys())
@@ -172,6 +192,17 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # 20-day Prior High (shifted by 1 to avoid look-ahead)
     out["HIGH20_PREV"] = high.shift(1).rolling(window=20, min_periods=15).max()
+
+    # Slow Stochastic (14, 3, 3) - strictly causal
+    low14 = low.rolling(window=14, min_periods=1).min()
+    high14 = high.rolling(window=14, min_periods=1).max()
+    fast_k = ((close - low14) / (high14 - low14).replace(0, np.nan)) * 100.0
+    out["STOCH_K"] = fast_k.rolling(window=3, min_periods=1).mean().fillna(50.0)
+    out["STOCH_D"] = out["STOCH_K"].rolling(window=3, min_periods=1).mean().fillna(50.0)
+
+    # Short-term Exponential Moving Averages (EMA 8 & EMA 21)
+    out["EMA8"] = close.ewm(span=8, adjust=False).mean()
+    out["EMA21"] = close.ewm(span=21, adjust=False).mean()
 
     return out
 
@@ -289,6 +320,31 @@ def compute_strategy_tp_sl_pct(
     base_tp_pct["VOL_SURGE"] = tp_vol
     base_sl_pct["VOL_SURGE"] = sl_vol
 
+    # 7. STOCH_REBOUND:
+    # SL: 5-day oversold swing low minus 0.35 * ATR
+    stoch_support = low5 - 0.35 * atr
+    sl_stoch = ((stoch_support / safe_close) - 1.0) * 100.0
+    sl_stoch = np.clip(sl_stoch, -8.0, -1.5)
+    # TP: 20-day swing high or +2.0 * ATR
+    stoch_target = np.maximum(high20 * 0.995, close + 2.0 * atr)
+    tp_stoch = ((stoch_target / safe_close) - 1.0) * 100.0
+    tp_stoch = np.clip(tp_stoch * rr_multiplier, np.maximum(2.0, np.abs(sl_stoch) * 1.25), 14.0)
+    base_tp_pct["STOCH_REBOUND"] = tp_stoch
+    base_sl_pct["STOCH_REBOUND"] = sl_stoch
+
+    # 8. EMA_PULLBACK:
+    # SL: Below EMA21 or 5-day swing low minus 0.30 * ATR
+    ema21 = df_ind["EMA21"].fillna(df_ind["Close"]).to_numpy(dtype=float)
+    ema_support = np.minimum(ema21, low5) - 0.30 * atr
+    sl_ema = ((ema_support / safe_close) - 1.0) * 100.0
+    sl_ema = np.clip(sl_ema, -8.0, -1.5)
+    # TP: 20-day high (+1.0%) or +2.2 * ATR
+    ema_target = np.maximum(high20 * 1.01, close + 2.2 * atr)
+    tp_ema = ((ema_target / safe_close) - 1.0) * 100.0
+    tp_ema = np.clip(tp_ema * rr_multiplier, np.maximum(2.2, np.abs(sl_ema) * 1.3), 15.0)
+    base_tp_pct["EMA_PULLBACK"] = tp_ema
+    base_sl_pct["EMA_PULLBACK"] = sl_ema
+
     return base_tp_pct, base_sl_pct
 
 
@@ -388,6 +444,30 @@ def generate_raw_signals(df_ind: pd.DataFrame) -> pd.DataFrame:
         & (daily_ret >= 0.01)
     ).fillna(False)
 
+    # 7. STOCH_REBOUND: Slow Stochastic %K crosses above %D from oversold (<= 32) with bullish bounce
+    stoch_k = df_ind["STOCH_K"]
+    stoch_d = df_ind["STOCH_D"]
+    stoch_oversold = stoch_k.rolling(window=3, min_periods=1).min() <= 32.0
+    sig_stoch = (
+        stoch_oversold
+        & (stoch_k > stoch_d)
+        & (stoch_k.shift(1) <= stoch_d.shift(1))
+        & is_bullish_candle
+        & (close > close.shift(1))
+    ).fillna(False)
+
+    # 8. EMA_PULLBACK: Short-term uptrend (EMA8 > EMA21), pullback near EMA8/EMA21, bullish reclaim of EMA8
+    ema8 = df_ind["EMA8"]
+    ema21 = df_ind["EMA21"]
+    sig_ema_pullback = (
+        (ema8 > ema21)
+        & (low <= ema8 * 1.003)
+        & (low >= ema21 * 0.985)
+        & (close > ema8)
+        & is_bullish_candle
+        & (close > close.shift(1))
+    ).fillna(False)
+
     signals = pd.DataFrame(
         {
             "MA_CROSS": sig_ma.astype(bool),
@@ -396,6 +476,8 @@ def generate_raw_signals(df_ind: pd.DataFrame) -> pd.DataFrame:
             "BB_BREAKOUT": sig_bb_break.astype(bool),
             "MACD_TURN": sig_macd.astype(bool),
             "VOL_SURGE": sig_vol.astype(bool),
+            "STOCH_REBOUND": sig_stoch.astype(bool),
+            "EMA_PULLBACK": sig_ema_pullback.astype(bool),
         },
         index=df_ind.index,
     )
@@ -468,7 +550,7 @@ def generate_trading_plan(
     position management instructions tailored to the strategy combination.
     """
     is_breakout = any(k in ("BB_BREAKOUT", "VOL_SURGE") for k in combo)
-    is_rebound = any(k in ("RSI_REBOUND", "BB_LOWER") for k in combo)
+    is_rebound = any(k in ("RSI_REBOUND", "BB_LOWER", "STOCH_REBOUND", "EMA_PULLBACK") for k in combo)
     atr_safe = max(entry_price * 0.01, atr_val)
 
     if is_breakout and not is_rebound:

@@ -1482,7 +1482,7 @@ def main() -> None:
                 "최대 조합 기법 개수",
                 options=[1, 2, 3],
                 value=3,
-                format_func=lambda v: f"최대 {v}개 조합 ({ {1:6, 2:21, 3:41}[v] }종)",
+                format_func=lambda v: f"최대 {v}개 조합 ({ {1:8, 2:36, 3:92}[v] }종)",
             )
             signal_window = st.slider("조합 시그널 시차 허용 (일)", 1, 4, 2)
             min_trades = st.slider("최소 과거 발생 횟수 (표본)", 3, 20, 5)
@@ -2452,7 +2452,7 @@ def main() -> None:
     # TAB 5: STRATEGY & TP/SL GUIDE
     # =========================================================================
     with tab_guide:
-        st.subheader("6대 핵심 매매기법별 익절선(Take-Profit) · 손절선(Stop-Loss) 설계 원리")
+        st.subheader("8대 핵심 매매기법별 익절선(Take-Profit) · 손절선(Stop-Loss) 설계 원리")
         st.markdown(
             """
             단순히 모든 종목과 기법에 일괄 고정 비율(`+4% / -4%`)을 적용하면, **역추세(볼린저 하단 반등)** 기법과 **추세 돌파(볼린저 상단·거래량 돌파)** 기법의

@@ -49,11 +49,11 @@ def make_synthetic_ohlcv(n: int = 300, seed: int = 42) -> pd.DataFrame:
 
 
 def test_combination_counts() -> None:
-    """Verify 6 base strategies produce 6 + 15 + 20 = 41 combinations."""
-    assert len(BASE_STRATEGY_KEYS) == 6
-    assert len(generate_all_combinations(max_comb=1)) == 6
-    assert len(generate_all_combinations(max_comb=2)) == 21
-    assert len(generate_all_combinations(max_comb=3)) == 41
+    """Verify 8 base strategies produce 8 + 28 + 56 = 92 combinations."""
+    assert len(BASE_STRATEGY_KEYS) == 8
+    assert len(generate_all_combinations(max_comb=1)) == 8
+    assert len(generate_all_combinations(max_comb=2)) == 36
+    assert len(generate_all_combinations(max_comb=3)) == 92
 
 
 def test_no_lookahead_bias_in_indicators_signals_and_tpsl() -> None:
@@ -68,7 +68,7 @@ def test_no_lookahead_bias_in_indicators_signals_and_tpsl() -> None:
     ind_full = compute_indicators(df_full)
     ind_part = compute_indicators(df_partial)
 
-    for col in ["SMA20", "SMA50", "ATR14", "RSI14", "BB_UPPER", "BB_LOWER", "MACD_HIST", "VOL_RATIO"]:
+    for col in ["SMA20", "SMA50", "ATR14", "RSI14", "BB_UPPER", "BB_LOWER", "MACD_HIST", "VOL_RATIO", "STOCH_K", "STOCH_D", "EMA8", "EMA21"]:
         np.testing.assert_allclose(
             ind_full[col].iloc[:cutoff].to_numpy(),
             ind_part[col].to_numpy(),
