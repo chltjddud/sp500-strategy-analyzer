@@ -167,27 +167,63 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _read_existing_cache(cpath: Path) -> pd.DataFrame:
+    if not cpath.exists():
+        return pd.DataFrame()
+    try:
+        return _clean_ohlcv(pd.read_csv(cpath, index_col=0, parse_dates=True))
+    except Exception:
+        return pd.DataFrame()
+
+
+def _merge_and_save_cache(cpath: Path, existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    if existing_df.empty:
+        merged = new_df
+    elif new_df.empty:
+        merged = existing_df
+    else:
+        merged = pd.concat([existing_df, new_df])
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    if not merged.empty:
+        merged.to_csv(cpath)
+    return merged
+
+
 def fetch_single_stock(
     ticker: str,
     period: str = "3y",
     use_cache: bool = True,
     max_age_hours: float = 12.0,
 ) -> pd.DataFrame:
-    """Fetch daily OHLCV for a single ticker with local CSV cache."""
+    """Fetch daily OHLCV for a single ticker with incremental local CSV cache."""
     ensure_dirs()
     norm_ticker = normalize_ticker(ticker)
     cpath = _cache_path(norm_ticker, period)
 
-    if use_cache and _is_cache_fresh(cpath, max_age_hours=max_age_hours):
-        try:
-            cached = pd.read_csv(cpath, index_col=0, parse_dates=True)
-            cleaned = _clean_ohlcv(cached)
-            if not cleaned.empty:
-                return cleaned
-        except Exception:
-            pass
+    existing_df = _read_existing_cache(cpath)
+    if use_cache and _is_cache_fresh(cpath, max_age_hours=max_age_hours) and not existing_df.empty:
+        return existing_df
+
+    # Incremental update if existing cache is valid and recent (within 21 days)
+    inc_start: Optional[str] = None
+    if len(existing_df) >= 60:
+        last_dt = pd.to_datetime(existing_df.index[-1])
+        if (datetime.now() - last_dt.to_pydatetime()).days <= 21:
+            inc_start = (last_dt - timedelta(days=4)).strftime("%Y-%m-%d")
 
     try:
+        if inc_start:
+            raw = yf.download(
+                norm_ticker,
+                start=inc_start,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            cleaned_new = _clean_ohlcv(raw)
+            return _merge_and_save_cache(cpath, existing_df, cleaned_new)
+
         raw = yf.download(
             norm_ticker,
             period=period,
@@ -201,11 +237,8 @@ def fetch_single_stock(
             cleaned.to_csv(cpath)
         return cleaned
     except Exception:
-        if cpath.exists():
-            try:
-                return _clean_ohlcv(pd.read_csv(cpath, index_col=0, parse_dates=True))
-            except Exception:
-                pass
+        if not existing_df.empty:
+            return existing_df
         return pd.DataFrame()
 
 
@@ -218,40 +251,81 @@ def fetch_multiple_stocks(
     progress_callback=None,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Fetch daily OHLCV for multiple tickers efficiently using local cache
-    and batched yfinance downloads for uncached tickers.
+    Fetch daily OHLCV for multiple tickers efficiently using incremental local cache
+    and batched yfinance downloads.
     """
     ensure_dirs()
     results: Dict[str, pd.DataFrame] = {}
-    to_download: List[str] = []
+    inc_items: Dict[str, pd.DataFrame] = {}
+    full_tickers: List[str] = []
 
     norm_tickers = [normalize_ticker(t) for t in tickers if t.strip()]
     norm_tickers = list(dict.fromkeys(norm_tickers))
 
     for t in norm_tickers:
         cpath = _cache_path(t, period)
-        if use_cache and _is_cache_fresh(cpath, max_age_hours=max_age_hours):
-            try:
-                df = _clean_ohlcv(pd.read_csv(cpath, index_col=0, parse_dates=True))
-                if len(df) >= 60:
-                    results[t] = df
-                    continue
-            except Exception:
-                pass
-        to_download.append(t)
+        existing_df = _read_existing_cache(cpath)
+        if use_cache and _is_cache_fresh(cpath, max_age_hours=max_age_hours) and len(existing_df) >= 60:
+            results[t] = existing_df
+            continue
+        if len(existing_df) >= 60:
+            last_dt = pd.to_datetime(existing_df.index[-1])
+            if (datetime.now() - last_dt.to_pydatetime()).days <= 21:
+                inc_items[t] = existing_df
+                continue
+        full_tickers.append(t)
 
-    if not to_download:
+    if not inc_items and not full_tickers:
         if progress_callback:
             progress_callback(1.0, f"캐시된 데이터 {len(results)}개 종목 로드 완료")
         return results
 
-    total_batches = (len(to_download) + batch_size - 1) // batch_size
+    # 1) Incremental batch download for stale caches
+    if inc_items:
+        min_last_dt = min(pd.to_datetime(df.index[-1]) for df in inc_items.values())
+        inc_start = (min_last_dt - timedelta(days=4)).strftime("%Y-%m-%d")
+        inc_list = list(inc_items.keys())
+        inc_batches = (len(inc_list) + batch_size - 1) // batch_size
+        for b_idx in range(inc_batches):
+            batch = inc_list[b_idx * batch_size : (b_idx + 1) * batch_size]
+            if progress_callback:
+                progress_callback(
+                    (b_idx + 0.5) / max(1, inc_batches + 1),
+                    f"증분 데이터 갱신 중... ({min(len(inc_list), (b_idx + 1) * batch_size)}/{len(inc_list)} 종목)",
+                )
+            try:
+                raw = yf.download(
+                    batch,
+                    start=inc_start,
+                    interval="1d",
+                    group_by="ticker",
+                    auto_adjust=True,
+                    progress=False,
+                    threads=True,
+                )
+                if len(batch) == 1:
+                    t = batch[0]
+                    merged = _merge_and_save_cache(_cache_path(t, period), inc_items[t], _clean_ohlcv(raw))
+                    if len(merged) >= 60:
+                        results[t] = merged
+                else:
+                    for t in batch:
+                        new_sub = _clean_ohlcv(raw[t].copy()) if t in raw.columns.get_level_values(0) else pd.DataFrame()
+                        merged = _merge_and_save_cache(_cache_path(t, period), inc_items[t], new_sub)
+                        if len(merged) >= 60:
+                            results[t] = merged
+            except Exception:
+                for t in batch:
+                    results[t] = inc_items[t]
+
+    # 2) Full batch download for uncached tickers
+    total_batches = (len(full_tickers) + batch_size - 1) // batch_size
     for b_idx in range(total_batches):
-        batch = to_download[b_idx * batch_size : (b_idx + 1) * batch_size]
+        batch = full_tickers[b_idx * batch_size : (b_idx + 1) * batch_size]
         if progress_callback:
             progress_callback(
-                (b_idx) / max(1, total_batches),
-                f"주가 데이터 다운로드 중... ({b_idx * batch_size + len(batch)}/{len(to_download)} 종목)",
+                b_idx / max(1, total_batches),
+                f"주가 데이터 다운로드 중... ({min(len(full_tickers), (b_idx + 1) * batch_size)}/{len(full_tickers)} 종목)",
             )
         try:
             raw = yf.download(
@@ -278,7 +352,6 @@ def fetch_multiple_stocks(
                             cleaned.to_csv(_cache_path(t, period))
                             results[t] = cleaned
         except Exception:
-            # Fallback to single download if batch had an issue
             for t in batch:
                 df = fetch_single_stock(t, period=period, use_cache=use_cache)
                 if len(df) >= 60:

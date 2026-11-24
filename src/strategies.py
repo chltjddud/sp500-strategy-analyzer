@@ -96,6 +96,29 @@ STRATEGY_METADATA: Dict[str, Dict[str, str]] = {
 
 BASE_STRATEGY_KEYS: List[str] = list(STRATEGY_METADATA.keys())
 
+STRATEGY_HOLD_DAYS: Dict[str, int] = {
+    "BB_LOWER": 7,
+    "STOCH_REBOUND": 7,
+    "RSI_REBOUND": 8,
+    "EMA_PULLBACK": 9,
+    "VOL_SURGE": 10,
+    "MACD_TURN": 11,
+    "BB_BREAKOUT": 12,
+    "MA_CROSS": 14,
+}
+
+
+def get_combo_hold_days(
+    combo: Tuple[str, ...],
+    default_hold_days: int = 10,
+    use_strategy_hold_days: bool = False,
+) -> int:
+    """Return strategy-tailored holding window (5..20 days) or uniform `default_hold_days`."""
+    if not use_strategy_hold_days or not combo:
+        return int(default_hold_days)
+    avg_days = sum(STRATEGY_HOLD_DAYS.get(k, default_hold_days) for k in combo) / len(combo)
+    return max(5, min(20, int(round(avg_days))))
+
 
 def format_combo_name(combo: Tuple[str, ...]) -> str:
     """Return human-readable Korean name for a strategy combination."""
@@ -544,6 +567,7 @@ def generate_trading_plan(
     sl_price: float,
     atr_val: float,
     hold_days: int = 10,
+    risk_budget_pct: float = 1.0,
 ) -> Dict[str, str]:
     """
     Generate concrete entry price range, max chase price, order type, and
@@ -591,13 +615,18 @@ def generate_trading_plan(
         )
 
     risk_pct = abs((sl_price / max(0.01, entry_price) - 1.0) * 100.0)
-    # 1% account risk sizing rule: position_weight = 1% / stop_loss_pct
-    rec_weight = min(25.0, round((1.0 / max(0.5, risk_pct)) * 100.0, 1))
+    # Dynamic risk sizing: 1.0% in stable markets, 0.5% in high-VIX / bear regime
+    rec_weight = min(25.0, round((risk_budget_pct / max(0.5, risk_pct)) * 100.0, 1))
+    sizing_note = (
+        f"1회 손실 {risk_budget_pct:.1f}% 기준"
+        if risk_budget_pct >= 0.99
+        else f"경계장 비중 축소 {risk_budget_pct:.1f}% 기준"
+    )
 
     return {
         "method_type": method_type,
         "entry_zone": f"${buy_low:.2f} ~ ${buy_high:.2f}",
         "max_chase": f"${max_chase:.2f}",
-        "rec_weight": f"총 자본의 최대 {rec_weight:.0f}% 이내 (1회 손실 1% 기준)",
+        "rec_weight": f"총 자본의 최대 {rec_weight:.0f}% 이내 ({sizing_note})",
         "order_step": order_step,
     }

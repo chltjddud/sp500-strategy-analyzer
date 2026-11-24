@@ -3,6 +3,8 @@ Vectorized Short-Term Swing Backtester & Strategy-Specific Take-Profit / Stop-Lo
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -17,6 +19,7 @@ from src.strategies import (
     format_combo_name,
     generate_raw_signals,
     generate_trading_plan,
+    get_combo_hold_days,
     get_combo_tp_sl_arrays,
     parse_combo_id,
 )
@@ -355,6 +358,10 @@ def analyze_single_stock(
     next_open_entry: bool = False,
     slippage_pct: float = 0.0,
     use_partial_tp: bool = False,
+    fast_active_only: bool = False,
+    use_strategy_hold_days: bool = False,
+    auto_tune_rr: bool = False,
+    use_dynamic_sizing: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, np.ndarray], Dict[str, Any]]:
     """
     Run full indicator, combination signal, and strategy-tailored TP/SL backtest on a single stock.
@@ -381,9 +388,14 @@ def analyze_single_stock(
     combo_signals = {cid: (arr & env_mask) for cid, arr in raw_combo_signals.items()}
 
     latest_vix = 18.0
-    if market_ctx_df is not None and not market_ctx_df.empty and "VIX_CLOSE" in market_ctx_df.columns:
-        latest_vix = float(market_ctx_df["VIX_CLOSE"].dropna().iloc[-1]) if market_ctx_df["VIX_CLOSE"].notna().any() else 18.0
+    spy_above_200 = True
+    if market_ctx_df is not None and not market_ctx_df.empty:
+        if "VIX_CLOSE" in market_ctx_df.columns and market_ctx_df["VIX_CLOSE"].notna().any():
+            latest_vix = float(market_ctx_df["VIX_CLOSE"].dropna().iloc[-1])
+        if "SPY_ABOVE_200" in market_ctx_df.columns and market_ctx_df["SPY_ABOVE_200"].notna().any():
+            spy_above_200 = bool(market_ctx_df["SPY_ABOVE_200"].dropna().iloc[-1])
     high_vix_mode = bool(require_multi_in_high_vix and latest_vix >= 25.0)
+    risk_budget_pct = 0.5 if (use_dynamic_sizing and (latest_vix >= 25.0 or not spy_above_200)) else 1.0
 
     base_tp_pct, base_sl_pct = compute_strategy_tp_sl_pct(
         df_ind, rr_multiplier=rr_multiplier
@@ -414,9 +426,13 @@ def analyze_single_stock(
     fb_map = feedback_bonus_map or {}
 
     for cid, sig_arr in combo_signals.items():
+        if fast_active_only and not np.any(sig_arr[max(0, n - recent_signal_days) : n]):
+            continue
+
         combo_tuple = parse_combo_id(cid)
         combo_name = format_combo_name(combo_tuple)
         num_strategies = len(combo_tuple)
+        combo_hold = get_combo_hold_days(combo_tuple, hold_days, use_strategy_hold_days)
 
         if use_dynamic_tpsl:
             tp_arr, sl_arr = get_combo_tp_sl_arrays(combo_tuple, base_tp_pct, base_sl_pct)
@@ -430,6 +446,42 @@ def analyze_single_stock(
         all_sig_raw = np.where(sig_arr)[0]
         dedup_sig_idx = _deduplicate_indices(all_sig_raw, cooldown=3)
 
+        # In-Sample (first 65%) R:R multiplier auto-tuning (strictly causal)
+        if auto_tune_rr and use_dynamic_tpsl and len(dedup_sig_idx) >= 6:
+            is_end = max(3, int(len(dedup_sig_idx) * 0.65))
+            is_sigs = dedup_sig_idx[:is_end]
+            best_mult = rr_multiplier
+            best_is_score = -1e9
+            base_scale = max(0.1, float(rr_multiplier))
+            for cand_mult in (0.85, 1.0, 1.2):
+                cand_tp = np.clip(tp_arr * (cand_mult / base_scale), 1.8, 18.0)
+                is_res = _evaluate_combo_on_bars(
+                    close=close,
+                    high=high,
+                    low=low,
+                    sig_indices=is_sigs,
+                    tp_arr=cand_tp,
+                    sl_arr=sl_arr,
+                    hold_days=combo_hold,
+                    use_breakeven_stop=use_breakeven_stop,
+                    open_arr=open_arr,
+                    next_open_entry=next_open_entry,
+                    use_partial_tp=use_partial_tp,
+                    slippage_pct=slippage_pct,
+                )
+                v_m = is_res["valid_eval"]
+                if np.sum(v_m) >= 3:
+                    is_score = (
+                        float(np.mean(is_res["target_hit"][v_m]) * 50.0)
+                        + float(np.mean(is_res["pure_win"][v_m]) * 50.0)
+                        + float(np.mean(is_res["realized_ret"][v_m]) * 2.0)
+                    )
+                    if is_score > best_is_score:
+                        best_is_score = is_score
+                        best_mult = cand_mult
+            if abs(best_mult - rr_multiplier) > 1e-6:
+                tp_arr = np.clip(tp_arr * (best_mult / base_scale), 1.8, 18.0)
+
         eval_res = _evaluate_combo_on_bars(
             close=close,
             high=high,
@@ -437,7 +489,7 @@ def analyze_single_stock(
             sig_indices=dedup_sig_idx,
             tp_arr=tp_arr,
             sl_arr=sl_arr,
-            hold_days=hold_days,
+            hold_days=combo_hold,
             use_breakeven_stop=use_breakeven_stop,
             open_arr=open_arr,
             next_open_entry=next_open_entry,
@@ -522,7 +574,8 @@ def analyze_single_stock(
             tp_price=cur_tp_price,
             sl_price=cur_sl_price,
             atr_val=float(atr_arr[ref_bar]),
-            hold_days=hold_days,
+            hold_days=combo_hold,
+            risk_budget_pct=risk_budget_pct,
         )
 
         records.append(
@@ -531,6 +584,7 @@ def analyze_single_stock(
                 "ComboID": cid,
                 "매매기법 조합": combo_name,
                 "기법 수": num_strategies,
+                "권장 보유일": combo_hold,
                 "발생 횟수": trade_count,
                 "목표 도달 확률(%)": round(hit_rate, 1),
                 "최근검증(OOS) 확률(%)": round(oos_hit_rate, 1),
@@ -698,13 +752,17 @@ def scan_market(
     slippage_pct: float = 0.0,
     use_partial_tp: bool = False,
     max_per_sector: int = 0,
+    fast_active_only: bool = False,
+    use_strategy_hold_days: bool = False,
+    auto_tune_rr: bool = False,
+    use_dynamic_sizing: bool = True,
     progress_callback=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Scan multiple S&P 500 stocks and aggregate:
+    Scan multiple S&P 500 stocks in parallel and aggregate:
       1. `active_signals_df`: Stocks currently flashing an active signal with exact TP/SL prices
       2. `best_per_stock_df`: The #1 highest-probability strategy combination for each stock
-      3. `leaderboard_df`: S&P 500 market-wide ranking of all 41 strategy combinations
+      3. `leaderboard_df`: S&P 500 market-wide ranking of all 92 strategy combinations
     """
     meta_map = {}
     if constituents_df is not None and not constituents_df.empty:
@@ -721,17 +779,10 @@ def scan_market(
     tickers = list(stock_data.keys())
     total = len(tickers)
 
-    for idx, ticker in enumerate(tickers):
-        if progress_callback and (idx % 5 == 0 or idx == total - 1):
-            progress_callback(
-                (idx + 1) / max(1, total),
-                f"매매기법별 맞춤 익절·손절 백테스팅 중... ({idx + 1}/{total}: {ticker})",
-            )
-
-        df = stock_data[ticker]
-        stats_df, _, _, _ = analyze_single_stock(
-            df=df,
-            ticker=ticker,
+    def _run_one(t: str) -> Tuple[str, pd.DataFrame]:
+        s_df, _, _, _ = analyze_single_stock(
+            df=stock_data[t],
+            ticker=t,
             hold_days=hold_days,
             target_pct=target_pct,
             stop_pct=stop_pct,
@@ -754,7 +805,41 @@ def scan_market(
             next_open_entry=next_open_entry,
             slippage_pct=slippage_pct,
             use_partial_tp=use_partial_tp,
+            fast_active_only=fast_active_only,
+            use_strategy_hold_days=use_strategy_hold_days,
+            auto_tune_rr=auto_tune_rr,
+            use_dynamic_sizing=use_dynamic_sizing,
         )
+        return t, s_df
+
+    per_ticker_stats: Dict[str, pd.DataFrame] = {}
+    if total > 8:
+        max_workers = min(8, os.cpu_count() or 4)
+        done_cnt = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_run_one, t): t for t in tickers}
+            for fut in as_completed(futures):
+                t, s_df = fut.result()
+                per_ticker_stats[t] = s_df
+                done_cnt += 1
+                if progress_callback and (done_cnt % 10 == 0 or done_cnt == total):
+                    progress_callback(
+                        done_cnt / max(1, total),
+                        f"병렬 백테스팅 중... ({done_cnt}/{total})",
+                    )
+    else:
+        for idx, t in enumerate(tickers):
+            _, s_df = _run_one(t)
+            per_ticker_stats[t] = s_df
+            if progress_callback:
+                progress_callback(
+                    (idx + 1) / max(1, total),
+                    f"백테스팅 중... ({idx + 1}/{total}: {t})",
+                )
+
+    for ticker in tickers:
+        df = stock_data[ticker]
+        stats_df = per_ticker_stats.get(ticker, pd.DataFrame())
         if stats_df.empty:
             continue
 

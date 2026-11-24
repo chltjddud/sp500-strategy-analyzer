@@ -507,6 +507,10 @@ def cached_scan_and_filter(
     slippage_pct: float = 0.0,
     use_partial_tp: bool = False,
     max_per_sector: int = 0,
+    fast_active_only: bool = False,
+    use_strategy_hold_days: bool = False,
+    auto_tune_rr: bool = False,
+    use_dynamic_sizing: bool = True,
     refresh_nonce: int = 0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
     constituents_df = cached_constituents()
@@ -541,6 +545,10 @@ def cached_scan_and_filter(
         slippage_pct=slippage_pct,
         use_partial_tp=use_partial_tp,
         max_per_sector=max_per_sector,
+        fast_active_only=fast_active_only,
+        use_strategy_hold_days=use_strategy_hold_days,
+        auto_tune_rr=auto_tune_rr,
+        use_dynamic_sizing=use_dynamic_sizing,
     )
 
     excluded_earnings_tickers: List[str] = []
@@ -1537,6 +1545,26 @@ def main() -> None:
                 format_func=lambda v: "제한 없음" if v == 0 else f"섹터당 상위 {v}개만 추천",
                 help="특정 섹터(예: 반도체·빅테크)에 추천 종목이 편중되는 것을 방지합니다.",
             )
+            use_strategy_hold_days = st.checkbox(
+                "기법 성격별 맞춤 보유 기간 자동 차등 적용 (7~14일)",
+                value=True,
+                help="단기 반등 기법(볼밴하단·스토캐스틱)은 7일, 추세 돌파 기법(이평선·상단돌파)은 12~14일로 맞춤 적용합니다.",
+            )
+            auto_tune_rr = st.checkbox(
+                "종목별 최적 손익비 배율(0.85~1.2x) 자동 튜닝",
+                value=False,
+                help="과거 In-Sample 구간에서 기대수익이 가장 높은 익절 목표치 배율을 자동 선택합니다.",
+            )
+            use_dynamic_sizing = st.checkbox(
+                "시장 국면별 동적 포지션 비중 조절 (경계장 0.5% 축소)",
+                value=True,
+                help="VIX 25 이상이거나 SPY가 200일선 아래일 때 1회 리스크 한도를 1%에서 0.5%로 자동 축소합니다.",
+            )
+            fast_active_only = st.checkbox(
+                "초고속 시그널 전용 스캔 (최근 신호 없는 조합 건너뛰기)",
+                value=False,
+                help="오늘 매수 가능한 시그널만 초고속으로 찾고 싶을 때 활성화하세요.",
+            )
 
         with st.expander("4. 매매기법 조합 세부 필터 (선택 사항)", expanded=False):
             max_comb = st.select_slider(
@@ -1654,6 +1682,10 @@ def main() -> None:
             slippage_pct=slippage_pct,
             use_partial_tp=use_partial_tp,
             max_per_sector=max_per_sector,
+            fast_active_only=fast_active_only,
+            use_strategy_hold_days=use_strategy_hold_days,
+            auto_tune_rr=auto_tune_rr,
+            use_dynamic_sizing=use_dynamic_sizing,
             refresh_nonce=refresh_nonce,
         )
 
