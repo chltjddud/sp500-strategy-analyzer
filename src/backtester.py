@@ -46,11 +46,14 @@ def _simulate_window_outcome(
     t_pct: float,
     s_pct: float,
     use_breakeven_stop: bool = False,
+    use_partial_tp: bool = False,
+    slippage_pct: float = 0.0,
 ) -> Tuple[bool, bool, bool, float, float, float, float]:
     """
     Simulate causal bar-by-bar forward outcome for a single trade window.
-    When `use_breakeven_stop` is True, once price reaches +50% of the TP target,
-    the Stop-Loss ratchets up to breakeven (+0.1%) for subsequent bars.
+    - `use_breakeven_stop`: ratchets SL to breakeven (+0.1%) once +50% of TP is reached.
+    - `use_partial_tp`: sells 50% at TP1 (+60% of TP) & moves SL to breakeven for remaining 50%.
+    - `slippage_pct`: round-trip slippage/fee % deducted from realized return.
     Returns: (target_hit, stop_hit_first, pure_win, realized_ret, max_ret, min_ret, end_ret)
     """
     max_h = float(np.max(w_high))
@@ -63,11 +66,18 @@ def _simulate_window_outcome(
 
     t_price = entry * (1.0 + t_pct / 100.0)
     s_price = entry * (1.0 + s_pct / 100.0)
+    tp1_pct = 0.6 * t_pct
+    tp1_price = entry * (1.0 + tp1_pct / 100.0)
     be_trigger = entry * (1.0 + 0.5 * t_pct / 100.0)
     be_stop_price = entry * 1.001
 
     t_hit = bool(np.any(w_high >= t_price))
     be_armed = False
+    tp1_taken = False
+
+    def _finish(ret_val: float, is_win: bool, hit_t_flag: bool, stop_first: bool):
+        net_ret = ret_val - slippage_pct
+        return hit_t_flag, stop_first, (net_ret > 0.0 if is_win else False), net_ret, max_r, min_r, end_r
 
     for b in range(len(w_close)):
         bh = float(w_high[b])
@@ -79,22 +89,34 @@ def _simulate_window_outcome(
         hit_s = bl <= cur_sl
 
         if hit_t and not hit_s:
-            return True, False, True, t_pct, max_r, min_r, end_r
+            win_ret = (0.5 * tp1_pct + 0.5 * t_pct) if use_partial_tp else t_pct
+            return _finish(win_ret, True, True, False)
         if hit_s and not hit_t:
+            if tp1_taken:
+                return _finish(0.5 * tp1_pct + 0.5 * 0.1, True, t_hit, False)
             if be_armed:
-                return t_hit, False, True, 0.1, max_r, min_r, end_r
-            return t_hit, True, False, s_pct, max_r, min_r, end_r
+                return _finish(0.1, True, t_hit, False)
+            return _finish(s_pct, False, t_hit, True)
         if hit_t and hit_s:
             if bc >= entry:
-                return True, False, True, t_pct, max_r, min_r, end_r
+                win_ret = (0.5 * tp1_pct + 0.5 * t_pct) if use_partial_tp else t_pct
+                return _finish(win_ret, True, True, False)
+            if tp1_taken:
+                return _finish(0.5 * tp1_pct + 0.5 * 0.1, True, t_hit, False)
             if be_armed:
-                return t_hit, False, True, 0.1, max_r, min_r, end_r
-            return t_hit, True, False, s_pct, max_r, min_r, end_r
+                return _finish(0.1, True, t_hit, False)
+            return _finish(s_pct, False, t_hit, True)
 
-        if use_breakeven_stop and bh >= be_trigger:
+        if use_partial_tp and not tp1_taken and bh >= tp1_price:
+            tp1_taken = True
+            be_armed = True
+        elif use_breakeven_stop and bh >= be_trigger:
             be_armed = True
 
-    return t_hit, False, (end_r > 0.0), end_r, max_r, min_r, end_r
+    if tp1_taken:
+        final_ret = 0.5 * tp1_pct + 0.5 * end_r
+        return _finish(final_ret, final_ret > 0.0, t_hit, False)
+    return _finish(end_r, end_r > 0.0, t_hit, False)
 
 
 def precompute_forward_outcomes(
@@ -189,6 +211,10 @@ def _evaluate_combo_on_bars(
     sl_arr: np.ndarray,
     hold_days: int,
     use_breakeven_stop: bool = False,
+    open_arr: Optional[np.ndarray] = None,
+    next_open_entry: bool = False,
+    use_partial_tp: bool = False,
+    slippage_pct: float = 0.0,
 ) -> Dict[str, np.ndarray]:
     """
     Fast evaluation of forward outcomes specifically on the bars where a strategy signaled.
@@ -210,15 +236,21 @@ def _evaluate_combo_on_bars(
     for i, t in enumerate(sig_indices):
         if not valid_eval[i]:
             continue
-        entry = close[t]
+        if next_open_entry and open_arr is not None and (t + 1) < n:
+            entry = float(open_arr[t + 1])
+            start_idx = t + 1
+        else:
+            entry = float(close[t])
+            start_idx = t + 1
+
         if entry <= 0 or np.isnan(entry):
             valid_eval[i] = False
             continue
 
-        end_idx = min(n, t + 1 + hold_days)
-        w_high = high[t + 1 : end_idx]
-        w_low = low[t + 1 : end_idx]
-        w_close = close[t + 1 : end_idx]
+        end_idx = min(n, start_idx + hold_days)
+        w_high = high[start_idx:end_idx]
+        w_low = low[start_idx:end_idx]
+        w_close = close[start_idx:end_idx]
         if len(w_close) == 0:
             valid_eval[i] = False
             continue
@@ -231,6 +263,8 @@ def _evaluate_combo_on_bars(
             t_pct=float(tp_arr[t]),
             s_pct=float(sl_arr[t]),
             use_breakeven_stop=use_breakeven_stop,
+            use_partial_tp=use_partial_tp,
+            slippage_pct=slippage_pct,
         )
         target_hit[i] = t_hit
         stop_hit_first[i] = s_first
@@ -317,6 +351,10 @@ def analyze_single_stock(
     use_sma200_filter: bool = False,
     use_breakeven_stop: bool = True,
     require_multi_in_high_vix: bool = True,
+    use_walk_forward: bool = True,
+    next_open_entry: bool = False,
+    slippage_pct: float = 0.0,
+    use_partial_tp: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, np.ndarray], Dict[str, Any]]:
     """
     Run full indicator, combination signal, and strategy-tailored TP/SL backtest on a single stock.
@@ -351,6 +389,7 @@ def analyze_single_stock(
         df_ind, rr_multiplier=rr_multiplier
     )
 
+    open_arr = df_ind["Open"].to_numpy(dtype=float)
     close = df_ind["Close"].to_numpy(dtype=float)
     high = df_ind["High"].to_numpy(dtype=float)
     low = df_ind["Low"].to_numpy(dtype=float)
@@ -366,6 +405,9 @@ def analyze_single_stock(
         "base_tp_pct": base_tp_pct,
         "base_sl_pct": base_sl_pct,
         "use_breakeven_stop": use_breakeven_stop,
+        "next_open_entry": next_open_entry,
+        "slippage_pct": slippage_pct,
+        "use_partial_tp": use_partial_tp,
     }
 
     records: List[Dict[str, Any]] = []
@@ -397,6 +439,10 @@ def analyze_single_stock(
             sl_arr=sl_arr,
             hold_days=hold_days,
             use_breakeven_stop=use_breakeven_stop,
+            open_arr=open_arr,
+            next_open_entry=next_open_entry,
+            use_partial_tp=use_partial_tp,
+            slippage_pct=slippage_pct,
         )
         valid_mask = eval_res["valid_eval"]
         trade_count = int(np.sum(valid_mask))
@@ -458,8 +504,17 @@ def analyze_single_stock(
 
         confidence_weight = trade_count / (trade_count + 5.0)
         adj_hit_rate = hit_rate * confidence_weight + 50.0 * (1.0 - confidence_weight)
+
+        # Walk-Forward Out-of-Sample (recent 35% of evaluated signals)
+        oos_count = max(2, int(round(trade_count * 0.35)))
+        if trade_count >= 5 and oos_count < trade_count:
+            oos_hit_rate = float(np.mean(t_hits[-oos_count:]) * 100.0)
+        else:
+            oos_hit_rate = hit_rate
+
+        effective_hit_score = (0.65 * adj_hit_rate + 0.35 * oos_hit_rate) if use_walk_forward else adj_hit_rate
         fb_bonus = float(fb_map.get(cid, 0.0))
-        composite_score = (0.55 * adj_hit_rate) + (0.45 * win_rate) + (avg_realized * 1.5) + fb_bonus
+        composite_score = (0.55 * effective_hit_score) + (0.45 * win_rate) + (avg_realized * 1.5) + fb_bonus
 
         plan = generate_trading_plan(
             combo=combo_tuple,
@@ -478,6 +533,7 @@ def analyze_single_stock(
                 "기법 수": num_strategies,
                 "발생 횟수": trade_count,
                 "목표 도달 확률(%)": round(hit_rate, 1),
+                "최근검증(OOS) 확률(%)": round(oos_hit_rate, 1),
                 "순수 승률(%)": round(win_rate, 1),
                 "기대 수익률(%)": round(avg_realized, 2),
                 "기준 진입가($)": round(ref_entry_price, 2),
@@ -637,6 +693,11 @@ def scan_market(
     use_breakeven_stop: bool = True,
     require_multi_in_high_vix: bool = True,
     use_sector_bonus: bool = True,
+    use_walk_forward: bool = True,
+    next_open_entry: bool = False,
+    slippage_pct: float = 0.0,
+    use_partial_tp: bool = False,
+    max_per_sector: int = 0,
     progress_callback=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -689,6 +750,10 @@ def scan_market(
             use_sma200_filter=use_sma200_filter,
             use_breakeven_stop=use_breakeven_stop,
             require_multi_in_high_vix=require_multi_in_high_vix,
+            use_walk_forward=use_walk_forward,
+            next_open_entry=next_open_entry,
+            slippage_pct=slippage_pct,
+            use_partial_tp=use_partial_tp,
         )
         if stats_df.empty:
             continue
@@ -735,6 +800,16 @@ def scan_market(
             ascending=[False, False, False, False],
             inplace=True,
         )
+        if max_per_sector and max_per_sector > 0 and "섹터" in active_signals_df.columns:
+            active_signals_df = (
+                active_signals_df.groupby("섹터", sort=False, group_keys=False)
+                .head(int(max_per_sector))
+            )
+            active_signals_df.sort_values(
+                by=["종합 점수", "목표 도달 확률(%)", "순수 승률(%)", "기대 수익률(%)"],
+                ascending=[False, False, False, False],
+                inplace=True,
+            )
         active_signals_df.reset_index(drop=True, inplace=True)
 
     if not best_per_stock_df.empty:

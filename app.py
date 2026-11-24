@@ -502,6 +502,11 @@ def cached_scan_and_filter(
     use_breakeven_stop: bool = True,
     require_multi_in_high_vix: bool = True,
     use_sector_bonus: bool = True,
+    use_walk_forward: bool = True,
+    next_open_entry: bool = False,
+    slippage_pct: float = 0.0,
+    use_partial_tp: bool = False,
+    max_per_sector: int = 0,
     refresh_nonce: int = 0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
     constituents_df = cached_constituents()
@@ -531,6 +536,11 @@ def cached_scan_and_filter(
         use_breakeven_stop=use_breakeven_stop,
         require_multi_in_high_vix=require_multi_in_high_vix,
         use_sector_bonus=use_sector_bonus,
+        use_walk_forward=use_walk_forward,
+        next_open_entry=next_open_entry,
+        slippage_pct=slippage_pct,
+        use_partial_tp=use_partial_tp,
+        max_per_sector=max_per_sector,
     )
 
     excluded_earnings_tickers: List[str] = []
@@ -1504,6 +1514,29 @@ def main() -> None:
                 value=False,
                 help="장기 하락 추세 종목을 제외하고 200일선 위 상승 추세 종목에서만 매수 타점을 찾습니다.",
             )
+            use_walk_forward = st.checkbox(
+                "전진 분석(OOS) 최근 구간 검증 가중치 반영",
+                value=True,
+                help="과거 65% 이후 최근 35% 검증 구간(Out-of-Sample) 적중률까지 함께 평가해 과최적화를 방지합니다.",
+            )
+            use_partial_tp = st.checkbox(
+                "분할 익절 적용 (1차 60% 도달 시 절반 익절 + 본절 방어)",
+                value=False,
+                help="목표가의 60%에 도달하면 절반을 먼저 수익 확정하고 나머지는 본절 스탑으로 끝까지 보유합니다.",
+            )
+            next_open_entry = st.checkbox(
+                "익일 시가(Open) 진입 + 왕복 수수료(0.1%) 보수적 검증",
+                value=False,
+                help="당일 종가 대신 다음 거래일 시가에 매수하고 수수료·슬리피지 0.1%를 차감해 실전 괴리율을 검증합니다.",
+            )
+            slippage_pct = 0.1 if next_open_entry else 0.0
+            max_per_sector = st.selectbox(
+                "동일 섹터 최대 추천 종목 수 (분산 투자)",
+                options=[0, 1, 2, 3],
+                index=2,
+                format_func=lambda v: "제한 없음" if v == 0 else f"섹터당 상위 {v}개만 추천",
+                help="특정 섹터(예: 반도체·빅테크)에 추천 종목이 편중되는 것을 방지합니다.",
+            )
 
         with st.expander("4. 매매기법 조합 세부 필터 (선택 사항)", expanded=False):
             max_comb = st.select_slider(
@@ -1616,6 +1649,11 @@ def main() -> None:
             use_breakeven_stop=use_breakeven_stop,
             require_multi_in_high_vix=require_multi_in_high_vix,
             use_sector_bonus=use_sector_bonus,
+            use_walk_forward=use_walk_forward,
+            next_open_entry=next_open_entry,
+            slippage_pct=slippage_pct,
+            use_partial_tp=use_partial_tp,
+            max_per_sector=max_per_sector,
             refresh_nonce=refresh_nonce,
         )
 
@@ -1807,6 +1845,7 @@ def main() -> None:
                     "실적발표(D-day)",
                 ]
                 extra_cols = [
+                    "최근검증(OOS) 확률(%)",
                     "매매 방법",
                     "추격금지 상한",
                     "익절폭(+%)",
