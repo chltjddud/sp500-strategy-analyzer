@@ -67,12 +67,9 @@ CREATE TABLE IF NOT EXISTS strategy_feedback (
 
 -- ============================================================================
 -- RLS (Row Level Security) 설정
--- 개인 프로젝트에서는 anon key로 읽기/쓰기할 수 있도록 비활성화되어 있습니다.
--- 멀티 유저/공개 배포 시에는 아래처럼 RLS를 활성화하고 정책을 적용하세요:
---   ALTER TABLE signal_logs ENABLE ROW LEVEL SECURITY;
---   CREATE POLICY "public_read" ON signal_logs FOR SELECT USING (true);
---   CREATE POLICY "service_write" ON signal_logs FOR ALL USING (auth.role() = 'service_role');
+-- 외부 anon/publishable 키 접근을 차단하고, 서버측(Streamlit/GitHub Actions)에서는
+-- Secret key (sb_secret_... / service_role)로 RLS를 우회하여 읽고 씁니다.
 -- ============================================================================
-ALTER TABLE strategy_baseline DISABLE ROW LEVEL SECURITY;
-ALTER TABLE signal_logs DISABLE ROW LEVEL SECURITY;
-ALTER TABLE strategy_feedback DISABLE ROW LEVEL SECURITY;
+ALTER TABLE strategy_baseline ENABLE ROW LEVEL SECURITY;
+ALTER TABLE signal_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE strategy_feedback ENABLE ROW LEVEL SECURITY;

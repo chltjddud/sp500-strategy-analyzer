@@ -14,7 +14,7 @@ from src.backtester import (
     precompute_forward_outcomes,
     scan_market,
 )
-from src.data_loader import get_sp500_constituents, normalize_ticker
+from src.data_loader import get_sp500_constituents
 from src.strategies import (
     BASE_STRATEGY_KEYS,
     compute_combination_signals,

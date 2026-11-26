@@ -4,7 +4,6 @@ S&P 500 Ticker & Historical OHLCV Data Loader with Local Caching.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import datetime, timedelta
 from io import StringIO

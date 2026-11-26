@@ -258,7 +258,6 @@ def compute_strategy_tp_sl_pct(
     high20 = df_ind["HIGH20"].fillna(df_ind["High"]).to_numpy(dtype=float)
 
     safe_close = np.where(close > 0, close, 1.0)
-    atr_pct = (atr / safe_close) * 100.0
 
     base_tp_pct: Dict[str, np.ndarray] = {}
     base_sl_pct: Dict[str, np.ndarray] = {}
@@ -399,7 +398,6 @@ def generate_raw_signals(df_ind: pd.DataFrame) -> pd.DataFrame:
     """
     open_p = df_ind["Open"]
     close = df_ind["Close"]
-    high = df_ind["High"]
     low = df_ind["Low"]
 
     sma20 = df_ind["SMA20"]

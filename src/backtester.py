@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from src.strategies import (
-    STRATEGY_METADATA,
     compute_combination_signals,
     compute_indicators,
     compute_strategy_tp_sl_pct,
@@ -858,7 +857,7 @@ def scan_market(
         top_row = stats_df.iloc[0].to_dict()
         best_per_stock.append(top_row)
 
-        active_sub = stats_df[stats_df["최근 시그널"] == True]
+        active_sub = stats_df[stats_df["최근 시그널"].fillna(False).astype(bool)]
         if not active_sub.empty:
             best_active = active_sub.iloc[0].to_dict()
             best_active["활성 조합 수"] = int(len(active_sub))
